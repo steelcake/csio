@@ -2,11 +2,16 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub fn Slab(comptime T: type) type {
+    const Key = packed struct(u64) {
+        generation: u32,
+        index: u32,
+    };
+
     const Entry = union(enum) {
-        occupied: T,
+        occupied: struct { generation: u32, val: T },
         // index of the next free slot. there is no space left if this index is equal to
         // the number of slots
-        free: u32,
+        free: struct { next_free: u32 },
     };
 
     return struct {
@@ -35,7 +40,7 @@ pub fn Slab(comptime T: type) type {
             alloc.free(self.elems);
         }
 
-        pub fn insert(self: *Self, val: T) error{OutOfCapacity}!u32 {
+        pub fn insert(self: *Self, val: T) error{OutOfCapacity}!u64 {
             const key_idx = self.first_free_entry;
             if (key_idx == self.elems.len) {
                 return error.OutOfCapacity;
@@ -45,8 +50,8 @@ pub fn Slab(comptime T: type) type {
 
             switch (entry) {
                 .occupied => unreachable,
-                .free => |next_free_e| {
-                    self.first_free_entry = next_free_e;
+                .free => |f| {
+                    self.first_free_entry = f.next_free;
                 },
             }
 
@@ -54,35 +59,39 @@ pub fn Slab(comptime T: type) type {
                 .occupied = val,
             };
 
-            return key_idx;
+            return Key{ .index = key_idx, .generation = self.current_generation };
         }
 
-        pub fn get(self: *const Self, key: u32) ?*const T {
-            const entry = &self.elems[key];
-            return switch (entry.*) {
-                .occupied => |*val| val,
+        pub fn get(self: *const Self, key: u64) ?T {
+            const k = @as(Key, @bitCast(key));
+            return switch (self.elems[k.index]) {
+                .occupied => |entry| {
+                    if (entry.generation != k.generation) {
+                        return null;
+                    }
+
+                    return entry.val;
+                },
                 .free => null,
             };
         }
 
-        pub fn get_mut(self: *Self, key: u32) ?*T {
-            const entry = &self.elems[key];
-            return switch (entry.*) {
-                .occupied => |*val| val,
-                .free => null,
-            };
-        }
+        pub fn remove(self: *Self, key: u64) ?T {
+            const k = @as(Key, @bitCast(key));
+            switch (self.elems[k.index]) {
+                .occupied => |entry| {
+                    if (entry.generation != k.generation) {
+                        return null;
+                    }
 
-        pub fn remove(self: *Self, key: u32) ?T {
-            const val = switch (self.elems[key]) {
-                .occupied => |val| val,
+                    self.elems[k.index] = .{ .free = .{ .next_free = self.first_free_entry } };
+                    self.first_free_entry = k.index;
+                    self.current_generation +%= 1;
+
+                    return entry.val;
+                },
                 .free => return null,
-            };
-
-            self.elems[key] = .{ .free = self.first_free_entry };
-            self.first_free_entry = key;
-
-            return val;
+            }
         }
     };
 }

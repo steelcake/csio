@@ -45,22 +45,11 @@ pub fn SliceMap(comptime K: type, comptime V: type) type {
             return null;
         }
 
-        pub fn get(self: *const Self, key: K) ?*const V {
+        pub fn get(self: *const Self, key: K) ?V {
             var idx: u32 = 0;
             while (idx < self.len) : (idx += 1) {
                 if (self.keys[idx] == key) {
-                    return &self.values[idx];
-                }
-            }
-
-            return null;
-        }
-
-        pub fn get_mut(self: *Self, key: K) ?*V {
-            var idx: u32 = 0;
-            while (idx < self.len) : (idx += 1) {
-                if (self.keys[idx] == key) {
-                    return &self.values[idx];
+                    return self.values[idx];
                 }
             }
 
