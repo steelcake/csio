@@ -8,26 +8,40 @@ const SliceMap = @import("./slice_map.zig").SliceMap;
 const Slab = @import("./slab.zig").Slab;
 const Task = @import("./task.zig").Task;
 
+pub const MAX_IO_PER_TASK = 256;
+
+const TaskEntry = struct {
+    task: Task,
+    finished_io_id: [MAX_IO_PER_TASK]u64,
+    finished_io_result: [MAX_IO_PER_TASK]i32,
+    num_finished_io: u8,
+    num_pending_io: u8,
+    finished_execution: bool,
+
+    fn push_cqe(self: *TaskEntry, cqe: linux.io_uring_cqe) void {
+        std.debug.assert(self.num_finished_io < MAX_IO_PER_TASK);
+        self.finished_io_id[self.num_finished_io] = cqe.user_data;
+        self.finished_io_result[self.num_finished_io] = cqe.res;
+        self.num_finished_io += 1;
+        self.num_pending_io -= 1;
+    }
+};
+
 pub const Executor = struct {
     const Self = @This();
 
-    const TaskEntry = struct {
-        task: Task,
-        finished_io: [128]u64,
-        num_finished_io: u8,
-        num_pending_io: u8,
-        finished_execution: bool,
-    };
-
     io_ring: IoUring,
     polled_io_ring: IoUring,
+
+    // io_id -> task_id
     io: Slab(u64),
 
-    // Finished io results kept as io_id(user_data) -> return_value mapping
-    io_results: SliceMap(u64, i32),
-
+    // task_id -> task_entry
     tasks: Slab(TaskEntry),
+
+    // task_id -> void
     to_notify: SliceMap(u64, void),
+
     preempt_duration_ns: u64,
 
     pub fn init(params: struct {
@@ -37,8 +51,11 @@ pub const Executor = struct {
         buddy: ?*const Executor,
         alloc: Allocator,
     }) error{ OutOfMemory, IoUringSetupFail }!Self {
+        const max_io = params.max_num_tasks * MAX_IO_PER_TASK;
+
         const io_ring = try IoUring.init(.{
             .entries = params.entries,
+            .max_io = max_io,
             .wq_fd = if (params.buddy) |b| b.io_ring.ring.fd else null,
             .polled_io = false,
             .alloc = params.alloc,
@@ -46,13 +63,13 @@ pub const Executor = struct {
 
         const polled_io_ring = try IoUring.init(.{
             .entries = params.entries,
+            .max_io = max_io,
             .wq_fd = if (params.buddy) |b| b.io_ring.ring.fd else io_ring.ring.fd,
             .polled_io = true,
             .alloc = params.alloc,
         });
 
-        const io = try Slab(u64).init(params.entries * 16, params.alloc);
-        const io_results = try SliceMap(u64, i32).init(params.entries * 16, params.alloc);
+        const io = try Slab(u64).init(max_io, params.alloc);
         const tasks = try Slab(Task).init(params.max_num_tasks, params.alloc);
         const to_notify = try SliceMap(u64, void).init(params.max_num_tasks, params.alloc);
 
@@ -60,7 +77,6 @@ pub const Executor = struct {
             .io_ring = io_ring,
             .polled_io_ring = polled_io_ring,
             .io = io,
-            .io_results = io_results,
             .tasks = tasks,
             .to_notify = to_notify,
             .preempt_duration_ns = params.preempt_duration_ns,
@@ -68,6 +84,8 @@ pub const Executor = struct {
     }
 
     pub fn deinit(self: *Self, alloc: Allocator) void {
+        std.debug.assert(self.tasks.is_empty());
+
         self.io_ring.deinit(alloc);
         self.polled_io_ring.deinit(alloc);
         self.io.deinit(alloc);
@@ -112,6 +130,12 @@ pub const Executor = struct {
                         }
 
                         self.drive_io();
+                    } else {
+                        for (entry.finished_io[0..entry.num_finished_io]) |finished_io_id| {
+                            self.io.remove(finished_io_id) orelse unreachable;
+                            _ = self.to_notify.remove(task_id);
+                            _ = self.tasks.remove(task_id) orelse unreachable;
+                        }
                     }
                 }
             }
@@ -119,36 +143,8 @@ pub const Executor = struct {
     }
 
     fn drive_io(self: *Self) void {
-        self.io_ring.sync_queues(&self.io_results);
-        self.polled_io_ring.sync_queues(&self.io_results);
-
-        var idx: u32 = 0;
-        while (idx < self.io_results.length()) {
-            const io_id = self.io_results.keys[idx];
-            const task_id = self.io.get(io_id) orelse unreachable;
-
-            const entry = self.tasks.get_mut_ref(task_id) orelse unreachable;
-
-            // assert that there is space for more finished io entries in the fixed size array
-            std.debug.assert(entry.num_finished_io < entry.finished_io.len);
-
-            entry.finished_io[entry.num_finished_io] = io_id;
-            entry.num_finished_io += 1;
-            entry.num_pending_io -= 1;
-
-            if (entry.finished_execution and entry.num_pending_io == 0) {
-                for (entry.finished_io[0..entry.num_finished_io]) |finished_io_id| {
-                    self.io.remove(finished_io_id) orelse unreachable;
-                    _ = self.io_results.swap_remove(idx) orelse unreachable;
-                    _ = self.to_notify.remove(task_id);
-                    const task = self.tasks.remove(task_id) orelse unreachable;
-                    task.task.deinit();
-                }
-            } else {
-                self.to_notify.insert(task_id, {});
-                idx += 1;
-            }
-        }
+        self.io_ring.sync_queues(&self.io, &self.tasks, &self.to_notify);
+        self.polled_io_ring.sync_queues(&self.io, &self.tasks, &self.to_notify);
     }
 };
 
@@ -167,6 +163,7 @@ const IoUring = struct {
 
     fn init(params: struct {
         entries: u16,
+        max_io: u16,
         /// file descriptor of another ring, will be used to share background threads with the other ring if passed.
         wq_fd: ?linux.fd_t,
         /// If this argument is true then this ring can only be used for writing/reading from sockets(napi) and files(direct_io)
@@ -196,8 +193,8 @@ const IoUring = struct {
         };
 
         // Use a larger sizes so we don't run out of capacity easily.
-        const io_queue = try Queue(linux.io_uring_sqe).init(params.entries * 8, params.alloc);
-        const io_submit_time = try SliceMap(u64, Instant).init(params.entries * 8, params.alloc);
+        const io_queue = try Queue(linux.io_uring_sqe).init(params.max_io, params.alloc);
+        const io_submit_time = try SliceMap(u64, Instant).init(params.max_io, params.alloc);
 
         return Self{
             .ring = ring,
@@ -216,16 +213,16 @@ const IoUring = struct {
     }
 
     fn maybe_warn_io_time(now: Instant, start: Instant) void {
-        const io_time_threshold_ns = 10 * 1000 * 1000;
+        const io_time_threshold_ns = 50 * 1000 * 1000;
         const elapsed = now.since(start);
         if (elapsed > io_time_threshold_ns) {
             std.log.warn("an io command has been running for {}ms", .{elapsed / (1000 * 1000)});
         }
     }
 
-    fn sync_cq(self: *Self, io_results: *SliceMap(u64, i32)) void {
+    fn sync_cq(self: *Self, io: *Slab(u64), tasks: *Slab(TaskEntry), to_notify: *SliceMap(u64, void)) void {
         const ready = self.ring.cq_ready();
-        const head = self.cq.head.* & self.cq.mask;
+        const head = self.ring.cq.head.* & self.ring.cq.mask;
 
         const now = Instant.now() catch unreachable;
 
@@ -235,7 +232,10 @@ const IoUring = struct {
             const start = self.io_submit_time.remove(cqe.user_data) orelse unreachable;
             maybe_warn_io_time(now, start);
 
-            std.debug.assert(io_results.insert(cqe.user_data, cqe.res) == null);
+            const task_id = io.get(cqe.user_data) orelse unreachable;
+            const entry = tasks.get_mut_ref(task_id) orelse unreachable;
+            entry.push_cqe(cqe);
+            _ = to_notify.insert(task_id, {}) catch unreachable;
         }
 
         // wrap self.cq.cqes
@@ -244,7 +244,10 @@ const IoUring = struct {
                 const start = self.io_submit_time.remove(cqe.user_data) orelse unreachable;
                 maybe_warn_io_time(now, start);
 
-                std.debug.assert(io_results.insert(cqe.user_data, cqe.res) == null);
+                const task_id = io.get(cqe.user_data) orelse unreachable;
+                const entry = tasks.get_mut_ref(task_id) orelse unreachable;
+                entry.push_cqe(cqe);
+                _ = to_notify.insert(task_id, {}) catch unreachable;
             }
         }
 
@@ -270,8 +273,8 @@ const IoUring = struct {
         }
     }
 
-    fn sync_queues(self: *Self, io_results: *SliceMap(u64, i32)) void {
-        self.sync_cq(io_results);
+    fn sync_queues(self: *Self, io: *Slab(u64), tasks: *Slab(TaskEntry), to_notify: *SliceMap(u64, void)) void {
+        self.sync_cq(io, tasks, to_notify);
         self.sync_sq();
     }
 };
