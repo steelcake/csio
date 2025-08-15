@@ -27,6 +27,10 @@ pub fn Queue(comptime T: type) type {
             return self.len;
         }
 
+        pub fn is_empty(self: *const Self) bool {
+            return self.len == 0;
+        }
+
         pub fn clear(self: *Self) void {
             self.start = 0;
             self.len = 0;

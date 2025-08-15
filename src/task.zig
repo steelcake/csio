@@ -9,19 +9,28 @@ const SlabKey = slab_mod.Key;
 const SliceMap = @import("./slice_map.zig").SliceMap;
 const Queue = @import("./queue.zig").Queue;
 
-pub const Future = struct {
-    ptr: *anyopaque,
-    poll_fn: *const fn (*anyopaque, ctx: *Context) void,
+pub const Task = struct {
+    pub const VTable = struct {
+        poll: *const fn (*anyopaque, ctx: *Context) bool,
+        deinit: *const fn (*anyopaque) void,
+    };
 
-    pub fn poll(self: Future, ctx: *Context) void {
-        return self.poll_fn(self.ptr, ctx);
+    ptr: *anyopaque,
+    vtable: VTable,
+
+    pub fn poll(self: Task, ctx: *Context) bool {
+        return self.vtable.poll(self.ptr, ctx);
+    }
+
+    pub fn deinit(self: Task) void {
+        return self.vtable.deinit(self.ptr);
     }
 };
 
 pub const Context = struct {
     start_t: Instant,
     task_id: u32,
-    tasks: *Slab(Future),
+    tasks: *Slab(Task),
     io_results: *SliceMap(SlabKey, i32),
     io_queue: *Queue(linux.io_uring_sqe),
     dio_queue: *Queue(linux.io_uring_sqe),

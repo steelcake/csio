@@ -25,6 +25,14 @@ pub fn SliceMap(comptime K: type, comptime V: type) type {
             alloc.free(self.values);
         }
 
+        pub fn length(self: *const Self) u32 {
+            return self.len;
+        }
+
+        pub fn is_empty(self: *const Self) bool {
+            return self.len == 0;
+        }
+
         pub fn insert(self: *Self, key: K, value: V) error{OutOfCapacity}!?V {
             var idx: u32 = 0;
             while (idx < self.len) : (idx += 1) {

@@ -46,6 +46,10 @@ pub fn Slab(comptime T: type) type {
             return self.n_occupied;
         }
 
+        pub fn is_empty(self: *const Self) bool {
+            return self.n_occupied == 0;
+        }
+
         pub fn insert(self: *Self, val: T) error{OutOfCapacity}!u64 {
             const key_idx = self.first_free_entry;
             if (key_idx == self.entries.len) {
@@ -79,6 +83,20 @@ pub fn Slab(comptime T: type) type {
                     }
 
                     return entry.val;
+                },
+                .free => null,
+            };
+        }
+
+        pub fn get_mut_ref(self: *const Self, key: u64) ?*T {
+            const k: Key = @bitCast(key);
+            return switch (self.entries[k.index]) {
+                .occupied => |*entry| {
+                    if (entry.generation != k.generation) {
+                        return null;
+                    }
+
+                    return &entry.val;
                 },
                 .free => null,
             };
