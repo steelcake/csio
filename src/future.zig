@@ -1,5 +1,6 @@
 const std = @import("std");
 const Instant = std.time.Instant;
+const linux = std.os.linux;
 
 const slab_mod = @import("./slab.zig");
 const Slab = slab_mod.Slab;
@@ -17,6 +18,15 @@ pub const Future = struct {
     }
 };
 
-pub const Context = struct { start_t: Instant, task_id: u32, tasks: *Slab(Future), io_results: *SliceMap(SlabKey, i32), io_queue: *Queue(), dio_queue: *Queue(), preempt_duration: u64, io: *Slab(SlabKey), to_notify: *SliceMap(SlabKey, void), notify_when: *SliceMap() };
-
-pub const VTable = struct {};
+pub const Context = struct {
+    start_t: Instant,
+    task_id: u32,
+    tasks: *Slab(Future),
+    io_results: *SliceMap(SlabKey, i32),
+    io_queue: *Queue(linux.io_uring_sqe),
+    dio_queue: *Queue(linux.io_uring_sqe),
+    preempt_duration_ns: u64,
+    io: *Slab(SlabKey),
+    to_notify: *SliceMap(SlabKey, void),
+    notify_when: *SliceMap(),
+};

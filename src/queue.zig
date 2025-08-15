@@ -23,6 +23,33 @@ pub fn Queue(comptime T: type) type {
             alloc.free(self.slots);
         }
 
+        pub fn length(self: *const Self) u32 {
+            return self.len;
+        }
+
+        pub fn clear(self: *Self) void {
+            self.start = 0;
+            self.len = 0;
+        }
+
+        pub fn push_batch(self: *Self, elems: []const T) error{OutOfCapacity}!void {
+            if (self.len + elems.len > self.slots.len) {
+                return error.OutOfCapacity;
+            }
+
+            // before wrapping around
+            const n = @min(self.slots.len - self.start, elems.len);
+            @memcpy(self.slots[self.start .. self.start + n], elems[0..n]);
+
+            // after wrapping around
+            if (n < elems.len) {
+                const m = elems.len - n;
+                @memcpy(self.slots[0..m], elems[n..]);
+            }
+
+            self.len += elems.len;
+        }
+
         pub fn push(self: *Self, elem: T) error{OutOfCapacity}!void {
             if (self.len == self.slots.len) {
                 return error.OutOfCapacity;

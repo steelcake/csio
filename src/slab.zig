@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const Key = struct {
+const Key = packed struct(u64) {
     generation: u32,
     index: u32,
 };
@@ -20,6 +20,7 @@ pub fn Slab(comptime T: type) type {
         // the number of slots
         first_free_entry: u32,
         current_generation: u32,
+        n_occupied: u32,
 
         pub fn init(capacity: u32, alloc: Allocator) error{OutOfMemory}!Self {
             const entries = try alloc.alloc(Entry, capacity);
@@ -33,6 +34,7 @@ pub fn Slab(comptime T: type) type {
                 .entries = entries,
                 .first_free_entry = 0,
                 .current_generation = 0,
+                .n_occupied = 0,
             };
         }
 
@@ -40,7 +42,11 @@ pub fn Slab(comptime T: type) type {
             alloc.free(self.entries);
         }
 
-        pub fn insert(self: *Self, val: T) error{OutOfCapacity}!Key {
+        pub fn num_occupied(self: *const Self) u32 {
+            return self.n_occupied;
+        }
+
+        pub fn insert(self: *Self, val: T) error{OutOfCapacity}!u64 {
             const key_idx = self.first_free_entry;
             if (key_idx == self.entries.len) {
                 return error.OutOfCapacity;
@@ -59,13 +65,16 @@ pub fn Slab(comptime T: type) type {
                 .occupied = val,
             };
 
-            return Key{ .index = key_idx, .generation = self.current_generation };
+            self.n_occupied += 1;
+
+            return @bitCast(Key{ .index = key_idx, .generation = self.current_generation });
         }
 
-        pub fn get(self: *const Self, key: Key) ?T {
-            return switch (self.entries[key.index]) {
+        pub fn get(self: *const Self, key: u64) ?T {
+            const k: Key = @bitCast(key);
+            return switch (self.entries[k.index]) {
                 .occupied => |entry| {
-                    if (entry.generation != key.generation) {
+                    if (entry.generation != k.generation) {
                         return null;
                     }
 
@@ -75,16 +84,18 @@ pub fn Slab(comptime T: type) type {
             };
         }
 
-        pub fn remove(self: *Self, key: Key) ?T {
-            switch (self.entries[key.index]) {
+        pub fn remove(self: *Self, key: u64) ?T {
+            const k: Key = @bitCast(key);
+            switch (self.entries[k.index]) {
                 .occupied => |entry| {
-                    if (entry.generation != key.generation) {
+                    if (entry.generation != k.generation) {
                         return null;
                     }
 
-                    self.entries[key.index] = .{ .free = .{ .next_free = self.first_free_entry } };
-                    self.first_free_entry = key.index;
+                    self.entries[k.index] = .{ .free = .{ .next_free = self.first_free_entry } };
+                    self.first_free_entry = k.index;
                     self.current_generation +%= 1;
+                    self.n_occupied -= 1;
 
                     return entry.val;
                 },
