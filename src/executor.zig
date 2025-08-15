@@ -34,19 +34,19 @@ pub const Executor = struct {
         max_num_tasks: u16 = 1024,
         entries: u16 = 64,
         preempt_duration_ns: u64 = 10 * 1000 * 1000,
-        wq_fd: ?linux.fd_t,
+        buddy: ?*const Executor,
         alloc: Allocator,
     }) error{ OutOfMemory, IoUringSetupFail }!Self {
         const io_ring = try IoUring.init(.{
             .entries = params.entries,
-            .wq_fd = params.wq_fd,
+            .wq_fd = if (params.buddy) |b| b.io_ring.ring.fd else null,
             .polled_io = false,
             .alloc = params.alloc,
         });
 
         const polled_io_ring = try IoUring.init(.{
             .entries = params.entries,
-            .wq_fd = io_ring.ring.fd,
+            .wq_fd = if (params.buddy) |b| b.io_ring.ring.fd else io_ring.ring.fd,
             .polled_io = true,
             .alloc = params.alloc,
         });
