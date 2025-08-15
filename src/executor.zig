@@ -22,6 +22,10 @@ pub const Executor = struct {
     io_ring: IoUring,
     polled_io_ring: IoUring,
     io: Slab(u64),
+
+    // Finished io results kept as io_id(user_data) -> return_value mapping
+    io_results: SliceMap(u64, i32),
+
     tasks: Slab(TaskEntry),
     to_notify: SliceMap(u64, void),
     preempt_duration_ns: u64,
@@ -48,6 +52,7 @@ pub const Executor = struct {
         });
 
         const io = try Slab(u64).init(params.entries * 16, params.alloc);
+        const io_results = try SliceMap(u64, i32).init(params.entries * 16, params.alloc);
         const tasks = try Slab(Task).init(params.max_num_tasks, params.alloc);
         const to_notify = try SliceMap(u64, void).init(params.max_num_tasks, params.alloc);
 
@@ -55,6 +60,7 @@ pub const Executor = struct {
             .io_ring = io_ring,
             .polled_io_ring = polled_io_ring,
             .io = io,
+            .io_results = io_results,
             .tasks = tasks,
             .to_notify = to_notify,
             .preempt_duration_ns = params.preempt_duration_ns,
@@ -79,37 +85,69 @@ pub const Executor = struct {
         _ = self.to_notify.insert(main_task_id, {}) catch unreachable;
 
         while (!self.tasks.is_empty()) {
-            if (self.to_notify.is_empty()) {
-                while (self.io_ring.io_results.is_empty() and self.polled_io_ring.io_results.is_empty()) {
-                    self.io_ring.sync_queues();
-                    self.polled_io_ring.sync_queues();
+            // Busy loop if there is no task to run
+            while (self.to_notify.is_empty()) {
+                self.drive_io();
 
-                    // Don't hog CPU while waiting for io to finish or submission queue to free up.
-                    // The sleep is for 1 nanosecond but the intention here is to just yield the cpu core to the OS so It can do other things with it
-                    // before coming back to this thread.
-                    std.Thread.sleep(1);
-                }
+                // Don't hog CPU while waiting for io to finish or submission queue to free up.
+                // The sleep is for 1 nanosecond but the intention here is to just yield the cpu core to the OS so It can do other things with it
+                // before coming back to this thread.
+                std.Thread.sleep(1);
             }
 
-            for (self.to_notify.keys[0..self.to_notify.len]) |task_id| {
+            // Run tasks
+            while (self.to_notify.swap_remove(0)) |task_id| {
                 if (self.tasks.get_mut_ref(task_id)) |entry| {
                     if (!entry.finished_execution) {
+                        const start = Instant.now();
+                        // TODO: pass proper context
                         if (entry.task.poll(.{})) {
                             entry.finished_execution = true;
-                        } else {
-                            self.io_ring.sync_queues();
-                            self.polled_io_ring.sync_queues();
                         }
 
-                        // TODO: check if task took too much time and warn if it did
+                        const now = Instant.now() catch unreachable;
+                        const elapsed = now.since(start);
+                        if (elapsed > self.preempt_duration_ns) {
+                            std.log.warn("A task took more than the configured preempt duration to run. It took {}ms.", .{elapsed / (1000 * 1000)});
+                        }
+
+                        self.drive_io();
                     }
                 }
             }
+        }
+    }
 
-            self.io_ring.sync_queues();
-            self.polled_io_ring.sync_queues();
+    fn drive_io(self: *Self) void {
+        self.io_ring.sync_queues(&self.io_results);
+        self.polled_io_ring.sync_queues(&self.io_results);
 
-            // TODO: process io_results of both
+        var idx: u32 = 0;
+        while (idx < self.io_results.length()) {
+            const io_id = self.io_results.keys[idx];
+            const task_id = self.io.get(io_id) orelse unreachable;
+
+            const entry = self.tasks.get_mut_ref(task_id) orelse unreachable;
+
+            // assert that there is space for more finished io entries in the fixed size array
+            std.debug.assert(entry.num_finished_io < entry.finished_io.len);
+
+            entry.finished_io[entry.num_finished_io] = io_id;
+            entry.num_finished_io += 1;
+            entry.num_pending_io -= 1;
+
+            if (entry.finished_execution and entry.num_pending_io == 0) {
+                for (entry.finished_io[0..entry.num_finished_io]) |finished_io_id| {
+                    self.io.remove(finished_io_id) orelse unreachable;
+                    _ = self.io_results.swap_remove(idx) orelse unreachable;
+                    _ = self.to_notify.remove(task_id);
+                    const task = self.tasks.remove(task_id) orelse unreachable;
+                    task.task.deinit();
+                }
+            } else {
+                self.to_notify.insert(task_id, {});
+                idx += 1;
+            }
         }
     }
 };
@@ -121,9 +159,6 @@ const IoUring = struct {
 
     // Queued to be pushed to the sq
     io_queue: Queue(linux.io_uring_sqe),
-
-    // Finished io results kept as user_data -> return_value mapping
-    io_results: SliceMap(u64, i32),
 
     // Keep submission time of IO so we can check if any IO is taking too much time.
     io_submit_time: SliceMap(u64, Instant),
@@ -162,13 +197,11 @@ const IoUring = struct {
 
         // Use a larger sizes so we don't run out of capacity easily.
         const io_queue = try Queue(linux.io_uring_sqe).init(params.entries * 8, params.alloc);
-        const io_results = try SliceMap(u64, i32).init(params.entries * 8, params.alloc);
         const io_submit_time = try SliceMap(u64, Instant).init(params.entries * 8, params.alloc);
 
         return Self{
             .ring = ring,
             .io_queue = io_queue,
-            .io_results = io_results,
             .io_submit_time = io_submit_time,
             .pending_io = 0,
         };
@@ -190,7 +223,7 @@ const IoUring = struct {
         }
     }
 
-    fn sync_cq(self: *Self) void {
+    fn sync_cq(self: *Self, io_results: *SliceMap(u64, i32)) void {
         const ready = self.ring.cq_ready();
         const head = self.cq.head.* & self.cq.mask;
 
@@ -202,7 +235,7 @@ const IoUring = struct {
             const start = self.io_submit_time.remove(cqe.user_data) orelse unreachable;
             maybe_warn_io_time(now, start);
 
-            std.debug.assert(self.io_results.insert(cqe.user_data, cqe.res) == null);
+            std.debug.assert(io_results.insert(cqe.user_data, cqe.res) == null);
         }
 
         // wrap self.cq.cqes
@@ -211,7 +244,7 @@ const IoUring = struct {
                 const start = self.io_submit_time.remove(cqe.user_data) orelse unreachable;
                 maybe_warn_io_time(now, start);
 
-                std.debug.assert(self.io_results.insert(cqe.user_data, cqe.res) == null);
+                std.debug.assert(io_results.insert(cqe.user_data, cqe.res) == null);
             }
         }
 
@@ -237,8 +270,8 @@ const IoUring = struct {
         }
     }
 
-    fn sync_queues(self: *Self) void {
-        self.sync_cq();
+    fn sync_queues(self: *Self, io_results: *SliceMap(u64, i32)) void {
+        self.sync_cq(io_results);
         self.sync_sq();
     }
 };

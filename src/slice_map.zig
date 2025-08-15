@@ -25,6 +25,24 @@ pub fn SliceMap(comptime K: type, comptime V: type) type {
             alloc.free(self.values);
         }
 
+        pub fn swap_remove(self: *Self, index: u32) ?struct { key: K, value: V } {
+            if (self.len == 0 or index >= self.len) {
+                return null;
+            }
+
+            const out = .{
+                .key = self.keys[index],
+                .value = self.values[index],
+            };
+
+            const end = self.len - 1;
+            self.keys[index] = self.keys[end];
+            self.values[index] = self.values[end];
+            self.len -= 1;
+
+            return out;
+        }
+
         pub fn length(self: *const Self) u32 {
             return self.len;
         }
