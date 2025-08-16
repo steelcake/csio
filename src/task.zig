@@ -9,33 +9,33 @@ const SlabKey = slab_mod.Key;
 const SliceMap = @import("./slice_map.zig").SliceMap;
 const Queue = @import("./queue.zig").Queue;
 
-pub const Task = struct {
-    pub const VTable = struct {
-        poll: *const fn (*anyopaque, ctx: *Context) bool,
-        deinit: *const fn (*anyopaque) void,
-    };
+pub const MAX_IO_PER_TASK = 128;
 
-    ptr: *anyopaque,
-    vtable: VTable,
-
-    pub fn poll(self: Task, ctx: *Context) bool {
-        return self.vtable.poll(self.ptr, ctx);
-    }
-
-    pub fn deinit(self: Task) void {
-        return self.vtable.deinit(self.ptr);
-    }
+pub const TaskEntry = struct {
+    task: Task,
+    finished_io_id: [MAX_IO_PER_TASK]u64,
+    finished_io_result: [MAX_IO_PER_TASK]i32,
+    num_finished_io: u8,
+    num_pending_io: u8,
+    finished_execution: bool,
 };
 
 pub const Context = struct {
     start_t: Instant,
     task_id: u32,
-    tasks: *Slab(Task),
-    io_results: *SliceMap(SlabKey, i32),
+    task_entry: *TaskEntry,
     io_queue: *Queue(linux.io_uring_sqe),
-    dio_queue: *Queue(linux.io_uring_sqe),
-    preempt_duration_ns: u64,
+    polled_io_queue: *Queue(linux.io_uring_sqe),
     io: *Slab(SlabKey),
     to_notify: *SliceMap(SlabKey, void),
-    notify_when: *SliceMap(),
+    preempt_duration_ns: u64,
+};
+
+pub const Task = struct {
+    ptr: *anyopaque,
+    poll_fn: *const fn (*anyopaque, ctx: *Context) void,
+
+    pub fn poll(self: Task, ctx: *Context) void {
+        self.poll_fn(self.ptr, ctx);
+    }
 };

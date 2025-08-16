@@ -6,26 +6,11 @@ const linux = std.os.linux;
 const Queue = @import("./queue.zig").Queue;
 const SliceMap = @import("./slice_map.zig").SliceMap;
 const Slab = @import("./slab.zig").Slab;
-const Task = @import("./task.zig").Task;
-
-pub const MAX_IO_PER_TASK = 256;
-
-const TaskEntry = struct {
-    task: Task,
-    finished_io_id: [MAX_IO_PER_TASK]u64,
-    finished_io_result: [MAX_IO_PER_TASK]i32,
-    num_finished_io: u8,
-    num_pending_io: u8,
-    finished_execution: bool,
-
-    fn push_cqe(self: *TaskEntry, cqe: linux.io_uring_cqe) void {
-        std.debug.assert(self.num_finished_io < MAX_IO_PER_TASK);
-        self.finished_io_id[self.num_finished_io] = cqe.user_data;
-        self.finished_io_result[self.num_finished_io] = cqe.res;
-        self.num_finished_io += 1;
-        self.num_pending_io -= 1;
-    }
-};
+const task_mod = @import("./task.zig");
+const Task = task_mod.Task;
+const TaskEntry = task_mod.TaskEntry;
+const Context = task_mod.Context;
+const MAX_IO_PER_TASK = task_mod.MAX_IO_PER_TASK;
 
 pub const Executor = struct {
     const Self = @This();
@@ -118,10 +103,17 @@ pub const Executor = struct {
                 if (self.tasks.get_mut_ref(task_id)) |entry| {
                     if (!entry.finished_execution) {
                         const start = Instant.now();
-                        // TODO: pass proper context
-                        if (entry.task.poll(.{})) {
-                            entry.finished_execution = true;
-                        }
+
+                        entry.task.poll(Context{
+                            .task_id = task_id,
+                            .to_notify = &self.to_notify,
+                            .preempt_duration_ns = self.preempt_duration_ns,
+                            .io = &self.io,
+                            .start_t = Instant.now(),
+                            .io_queue = &self.io_ring.io_queue,
+                            .polled_io_queue = &self.polled_io_ring.io_queue,
+                            .task_entry = entry,
+                        });
 
                         const now = Instant.now() catch unreachable;
                         const elapsed = now.since(start);
@@ -130,12 +122,11 @@ pub const Executor = struct {
                         }
 
                         self.drive_io();
-                    } else {
-                        for (entry.finished_io[0..entry.num_finished_io]) |finished_io_id| {
+                    } else if (entry.num_pending_io == 0) {
+                        for (entry.finished_io_id[0..entry.num_finished_io]) |finished_io_id| {
                             self.io.remove(finished_io_id) orelse unreachable;
-                            _ = self.to_notify.remove(task_id);
-                            _ = self.tasks.remove(task_id) orelse unreachable;
                         }
+                        _ = self.tasks.remove(task_id) orelse unreachable;
                     }
                 }
             }
@@ -220,6 +211,14 @@ const IoUring = struct {
         }
     }
 
+    pub fn push_cqe(entry: *TaskEntry, cqe: linux.io_uring_cqe) void {
+        std.debug.assert(entry.num_finished_io < MAX_IO_PER_TASK);
+        entry.finished_io_id[entry.num_finished_io] = cqe.user_data;
+        entry.finished_io_result[entry.num_finished_io] = cqe.res;
+        entry.num_finished_io += 1;
+        entry.num_pending_io -= 1;
+    }
+
     fn sync_cq(self: *Self, io: *Slab(u64), tasks: *Slab(TaskEntry), to_notify: *SliceMap(u64, void)) void {
         const ready = self.ring.cq_ready();
         const head = self.ring.cq.head.* & self.ring.cq.mask;
@@ -234,7 +233,7 @@ const IoUring = struct {
 
             const task_id = io.get(cqe.user_data) orelse unreachable;
             const entry = tasks.get_mut_ref(task_id) orelse unreachable;
-            entry.push_cqe(cqe);
+            push_cqe(entry, cqe);
             _ = to_notify.insert(task_id, {}) catch unreachable;
         }
 
@@ -246,7 +245,7 @@ const IoUring = struct {
 
                 const task_id = io.get(cqe.user_data) orelse unreachable;
                 const entry = tasks.get_mut_ref(task_id) orelse unreachable;
-                entry.push_cqe(cqe);
+                push_cqe(entry, cqe);
                 _ = to_notify.insert(task_id, {}) catch unreachable;
             }
         }
