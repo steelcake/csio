@@ -83,6 +83,7 @@ pub const Executor = struct {
             .task = main_task,
             .finished_io = undefined,
             .num_finished_io = 0,
+            .num_pending_io = 0,
             .finished_execution = false,
         }) orelse unreachable;
         _ = self.to_notify.insert(main_task_id, {}) catch unreachable;
@@ -104,7 +105,7 @@ pub const Executor = struct {
                     if (!entry.finished_execution) {
                         const start = Instant.now();
 
-                        entry.task.poll(Context{
+                        const poll_res = entry.task.poll(Context{
                             .task_id = task_id,
                             .to_notify = &self.to_notify,
                             .preempt_duration_ns = self.preempt_duration_ns,
@@ -114,6 +115,10 @@ pub const Executor = struct {
                             .polled_io_queue = &self.polled_io_ring.io_queue,
                             .task_entry = entry,
                         });
+                        switch (poll_res) {
+                            .ready => entry.finished_execution = true,
+                            .pending => {},
+                        }
 
                         const now = Instant.now() catch unreachable;
                         const elapsed = now.since(start);
@@ -213,8 +218,7 @@ const IoUring = struct {
 
     pub fn push_cqe(entry: *TaskEntry, cqe: linux.io_uring_cqe) void {
         std.debug.assert(entry.num_finished_io < MAX_IO_PER_TASK);
-        entry.finished_io_id[entry.num_finished_io] = cqe.user_data;
-        entry.finished_io_result[entry.num_finished_io] = cqe.res;
+        entry.finished_io[entry.num_finished_io] = cqe;
         entry.num_finished_io += 1;
         entry.num_pending_io -= 1;
     }

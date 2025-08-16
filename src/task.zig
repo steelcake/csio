@@ -13,8 +13,7 @@ pub const MAX_IO_PER_TASK = 128;
 
 pub const TaskEntry = struct {
     task: Task,
-    finished_io_id: [MAX_IO_PER_TASK]u64,
-    finished_io_result: [MAX_IO_PER_TASK]i32,
+    finished_io: [MAX_IO_PER_TASK]linux.io_uring_cqe,
     num_finished_io: u8,
     num_pending_io: u8,
     finished_execution: bool,
@@ -29,13 +28,51 @@ pub const Context = struct {
     io: *Slab(SlabKey),
     to_notify: *SliceMap(SlabKey, void),
     preempt_duration_ns: u64,
+
+    pub fn queue_io(self: *Context, polled: bool, io: linux.io_uring_sqe) error{OutOfIoCapacity}!u64 {
+        const entry = self.task_entry;
+        if (entry.num_pending_io + entry.num_finished_io == MAX_IO_PER_TASK) {
+            return error.OutOfCapacity;
+        }
+
+        var sqe = io;
+        const io_id = self.io.insert(self.task_id);
+        sqe.user_data = io_id;
+
+        if (polled) {
+            self.polled_io_queue.push(sqe) catch unreachable;
+        } else {
+            self.io_queue.push(sqe) catch unreachable;
+        }
+
+        return io_id;
+    }
+
+    pub fn remove_io_result(self: *Context, io_id: u64) ?linux.io_uring_cqe {
+        for (self.task_entry.finished_io[0..self.task_entry.num_finished_io], 0..) |cqe, idx| {
+            if (cqe.user_data == io_id) {
+                self.task_entry.num_finished_io -= 1;
+                self.task_entry.finished_io[idx] = self.task_entry.finished_io[self.task_entry.num_finished_io];
+                return cqe;
+            }
+        }
+
+        return null;
+    }
 };
+
+pub fn PollResult(comptime T: type) type {
+    return union(enum) {
+        ready: T,
+        pending,
+    };
+}
 
 pub const Task = struct {
     ptr: *anyopaque,
-    poll_fn: *const fn (*anyopaque, ctx: *Context) void,
+    poll_fn: *const fn (*anyopaque, ctx: *Context) PollResult(void),
 
-    pub fn poll(self: Task, ctx: *Context) void {
-        self.poll_fn(self.ptr, ctx);
+    pub fn poll(self: Task, ctx: *Context) PollResult(void) {
+        return self.poll_fn(self.ptr, ctx);
     }
 };
