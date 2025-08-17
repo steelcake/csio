@@ -11,6 +11,7 @@ const Task = task_mod.Task;
 const TaskEntry = task_mod.TaskEntry;
 const Context = task_mod.Context;
 const MAX_IO_PER_TASK = task_mod.MAX_IO_PER_TASK;
+const IoAlloc = @import("./io_alloc.zig").IoAlloc;
 
 pub const Executor = struct {
     const Self = @This();
@@ -27,6 +28,9 @@ pub const Executor = struct {
     // task_id -> void
     to_notify: SliceMap(u64, void),
 
+    // Allocator for direct_io read/write
+    io_alloc: IoAlloc,
+
     preempt_duration_ns: u64,
 
     pub fn init(params: struct {
@@ -37,6 +41,8 @@ pub const Executor = struct {
         alloc: Allocator,
     }) error{ OutOfMemory, IoUringSetupFail }!Self {
         const max_io = params.max_num_tasks * MAX_IO_PER_TASK;
+
+        const io_buffers = try Slab([IO_BUF_SIZE]u8).init_aligned(std.mem.Alignment.fromByteUnits(IO_BUF_ALIGN), max_io);
 
         const io_ring = try IoUring.init(.{
             .entries = params.entries,

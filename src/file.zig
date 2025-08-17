@@ -5,6 +5,47 @@ const task_mod = @import("./task.zig");
 const Context = task_mod.Context;
 const PollResult = task_mod.PollResult;
 
+pub const DioFile = struct {
+    fd: linux.fd_t,
+
+    pub fn open(path: [:0]const u8, flags: i32, mode: linux.mode_t) Open {
+        return .{
+            .path = path,
+            .flags = flags,
+            .mode = mode,
+            .io_id = null,
+        };
+    }
+
+    pub fn close(self: DioFile) Close {
+        return .{
+            .fd = self.fd,
+            .io_id = null,
+        };
+    }
+};
+
+pub const DioRead = struct {
+    fd: linux.fd_t,
+
+    io_ids: [4]u64,
+    io_running: [4]bool,
+
+    pub fn poll(self: *DioRead, ctx: Context) PollResult(!DioBuf) {}
+};
+
+pub const DioBuf = struct {
+    _alloc_buf: []align(ALIGN) u8,
+    _alloc: *IoAlloc,
+
+    /// Requested data
+    buf: []const u8,
+
+    pub fn release(self: *const IoBuf) void {
+        self._alloc.free(self._alloc_buf);
+    }
+};
+
 pub const File = struct {
     fd: linux.fd_t,
 
@@ -39,15 +80,19 @@ pub const File = struct {
             .buf = buf,
         };
     }
-
-    pub fn unlink(path: [:0]const u8, flags: u32) Unlink {
-        return .{ .path = path, .flags = flags };
-    }
-
-    pub fn mkdir(path: [:0]const u8, mode: linux.mode_t) Mkdir {
-        return .{ .path = path, .mode = mode };
-    }
 };
+
+pub fn unlink(path: [:0]const u8) UnlinkAt {
+    return .{ .path = path, .flags = 0 };
+}
+
+pub fn rmdir(path: [:0]const u8) UnlinkAt {
+    return .{ .path = path, .flags = linux.AT.REMOVEDIR };
+}
+
+pub fn mkdir(path: [:0]const u8, mode: linux.mode_t) Mkdir {
+    return .{ .path = path, .mode = mode };
+}
 
 pub const Mkdir = struct {
     path: [:0]const u8,
@@ -77,13 +122,13 @@ pub const Mkdir = struct {
     }
 };
 
-pub const Unlink = struct {
+pub const UnlinkAt = struct {
     path: [:0]const u8,
     flags: u32,
 
     io_id: ?u64,
 
-    pub fn poll(self: *Unlink, ctx: Context) PollResult(!void) {
+    pub fn poll(self: *UnlinkAt, ctx: Context) PollResult(!void) {
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
                 switch (cqe.err()) {
