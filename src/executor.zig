@@ -276,7 +276,15 @@ const IoUring = struct {
         }
     }
 
+    fn maybe_wakeup(self: *Self) void {
+        var flags = 0;
+        if (self.ring.sq_ring_needs_enter(&flags)) {
+            self.ring.enter(0, 0, flags) catch unreachable;
+        }
+    }
+
     fn sync_queues(self: *Self, io: *Slab(u64), tasks: *Slab(TaskEntry), to_notify: *SliceMap(u64, void)) void {
+        self.maybe_wakeup();
         self.sync_cq(io, tasks, to_notify);
         self.sync_sq();
     }
