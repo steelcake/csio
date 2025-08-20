@@ -31,31 +31,36 @@ pub const Executor = struct {
     // Allocator for direct_io read/write
     io_alloc: IoAlloc,
 
+    wq_fd: linux.fd_t,
+
     preempt_duration_ns: u64,
 
     pub fn init(params: struct {
         max_num_tasks: u16 = 1024,
         entries: u16 = 64,
+        io_alloc_capacity: u32 = 1 << 28,
         preempt_duration_ns: u64 = 10 * 1000 * 1000,
-        buddy: ?*const Executor,
+        wq_fd: ?linux.fd_t,
         alloc: Allocator,
     }) error{ OutOfMemory, IoUringSetupFail }!Self {
         const max_io = params.max_num_tasks * MAX_IO_PER_TASK;
 
-        const io_buffers = try Slab([IO_BUF_SIZE]u8).init_aligned(std.mem.Alignment.fromByteUnits(IO_BUF_ALIGN), max_io);
+        const io_alloc = try IoAlloc.init(params.io_alloc_capacity, max_io, params.alloc);
 
         const io_ring = try IoUring.init(.{
             .entries = params.entries,
             .max_io = max_io,
-            .wq_fd = if (params.buddy) |b| b.io_ring.ring.fd else null,
+            .wq_fd = params.wq_fd,
             .polled_io = false,
             .alloc = params.alloc,
         });
 
+        const wq_fd = if (params.wq_fd) |w| w else io_ring.ring.fd;
+
         const polled_io_ring = try IoUring.init(.{
             .entries = params.entries,
             .max_io = max_io,
-            .wq_fd = if (params.buddy) |b| b.io_ring.ring.fd else io_ring.ring.fd,
+            .wq_fd = wq_fd,
             .polled_io = true,
             .alloc = params.alloc,
         });
@@ -71,7 +76,13 @@ pub const Executor = struct {
             .tasks = tasks,
             .to_notify = to_notify,
             .preempt_duration_ns = params.preempt_duration_ns,
+            .wq_fd = wq_fd,
+            .io_alloc = io_alloc,
         };
+    }
+
+    pub fn get_wq_fd(self: *const Self) linux.fd_t {
+        return self.wq_fd;
     }
 
     pub fn deinit(self: *Self, alloc: Allocator) void {
@@ -82,6 +93,7 @@ pub const Executor = struct {
         self.io.deinit(alloc);
         self.tasks.deinit(alloc);
         self.to_notify.deinit(alloc);
+        self.io_alloc.deinit(alloc);
     }
 
     pub fn run(self: *Self, main_task: Task) void {

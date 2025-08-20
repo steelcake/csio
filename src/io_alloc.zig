@@ -9,9 +9,9 @@ pub const IoAlloc = struct {
     free_sizes: []u32,
     free_ptrs: [][*]align(ALIGN) u8,
     num_free: u16,
-    buf: []align(ALIGN) u8,
+    buf: []align(ALIGN)u8,
 
-    pub fn init(capacity: u32, num_slots: u16, allocator: Allocator) error{OutOfMemory}!IoAlloc {
+    pub fn init(capacity: u32, num_slots: u16, allocator: Allocator) error {OutOfMemory}!IoAlloc {
         if (capacity == 0 or num_slots == 0) {
             return .{
                 .free_sizes = &.{},
@@ -27,7 +27,7 @@ pub const IoAlloc = struct {
         errdefer allocator.free(buf);
         const free_sizes = try allocator.alloc(u32, num_slots);
         errdefer allocator.free(free_sizes);
-        const free_ptrs = try allocator.alloc([*]align(ALIGN) u8, num_slots);
+        const free_ptrs = try allocator.alloc([*]align(ALIGN)u8, num_slots);
         errdefer allocator.free(free_ptrs);
 
         free_sizes[0] = cap;
@@ -47,7 +47,7 @@ pub const IoAlloc = struct {
         allocator.free(self.buf);
     }
 
-    pub fn alloc(self: *IoAlloc, len: u32) error{OutOfMemory}!IoBuf {
+    pub fn alloc(self: *IoAlloc, len: u32) error {OutOfMemory}![]align(ALIGN)u8 {
         std.debug.assert(len % ALIGN_B == 0);
 
         // find first sufficient slot
@@ -84,10 +84,10 @@ pub const IoAlloc = struct {
             self.free_ptrs.ptr[min_idx] = out.ptr[len..];
         }
 
-        return .{ ._alloc = self, ._alloc_buf = out, .buf = out };
+        return out;
     }
 
-    pub fn free(self: *IoAlloc, slice: []align(ALIGN) u8) void {
+    pub fn free(self: *IoAlloc, slice: []align(ALIGN)u8) void {
         std.debug.assert(slice.len % ALIGN_B == 0);
 
         const start = @intFromPtr(slice.ptr);
