@@ -88,6 +88,8 @@ pub const IoAlloc = struct {
             self.free_ptrs.ptr[min_idx] = out.ptr[len..];
         }
 
+        @memset(out, 0);
+
         return out;
     }
 

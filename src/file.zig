@@ -26,28 +26,116 @@ pub const DioFile = struct {
     }
 
     pub fn read(self: *const DioFile, offset: u64, size: u32) DioRead {
-        return .{
-            .fd = self.fd,
-            .io_ids = undefined,
-            .io_running = undefined,
-            .io_offset = undefined,
-            .io_size = undefined,
-            .offset = offset,
-            .size = size,
-        };
+        return DioRead.init(self.fd, offset, size);
+    }
+
+    /// This function doesn't take ownership of `buf`. The caller still has to call `.release()` on it.
+    pub fn write(self: *const DioFile, buf: *const DioBuf, offset: u64) DioWrite {
+        return DioWrite.init(self.fd, buf, offset);
     }
 };
 
-fn align_forward(addr: usize, alignment: usize) usize {
+pub fn align_forward(addr: usize, alignment: usize) usize {
     return (addr +% alignment -% 1) & ~(alignment -% 1);
 }
 
-fn align_backward(addr: usize, alignment: usize) usize {
+pub fn align_backward(addr: usize, alignment: usize) usize {
     return addr & ~(alignment - 1);
 }
 
+const MAX_DIO_SIZE = 1 << 19; // 512KB
+const DIO_CONCURRENCY = 4; // per single read/write call
+
+pub const DioWrite = struct {
+    const CONCURRENCY = DIO_CONCURRENCY;
+
+    fd: linux.fd_t,
+
+    // Record concurrent pending io state
+    io_id: [CONCURRENCY]u64,
+    io_size: [CONCURRENCY]u16,
+    io_is_running: [CONCURRENCY]bool,
+
+    io_buf: *const DioBuf,
+
+    // These are modified as IO is issued
+    offset: u64,
+    size: usize,
+
+    fn init(fd: linux.fd_t, buf: *const DioBuf, offset: u64) DioWrite {
+        return .{
+            .fd = fd,
+            .io_buf = buf,
+            .offset = offset,
+            .size = @intCast(buf.alloc_buf.len),
+            .io_id = undefined,
+            .io_size = undefined,
+            .io_is_running = std.mem.zeroes([CONCURRENCY]bool),
+        };
+    }
+
+    pub fn poll(self: *DioWrite, ctx: Context) PollResult(!void) {
+        // check if any io is finished and count pending io
+        var num_pending: u8 = 0;
+        for (0..CONCURRENCY) |io_idx| {
+            if (self.io_is_running[io_idx]) {
+                if (ctx.remove_io_result(self.io_id[io_idx])) |cqe| {
+                    switch (cqe.err()) {
+                        .SUCCESS => {
+                            const n: u32 = @intCast(cqe.res);
+                            std.debug.assert(n <= self.io_size[io_idx]);
+                            if (n < self.io_size[io_idx]) {
+                                return .{ .ready = error.ShortWrite };
+                            }
+                            self.io_is_running[io_idx] = false;
+                        },
+                        else => |e| return .{ .ready = e },
+                    }
+                } else {
+                    num_pending += 1;
+                }
+            }
+        }
+
+        if (num_pending == 0 and self.size == 0) {
+            return .{ .ready = {} };
+        }
+
+        // queue new io
+        for (0..CONCURRENCY) |io_idx| {
+            if (self.size == 0) {
+                break;
+            }
+
+            if (!self.io_is_running[io_idx]) {
+                const io_buf_ptr: [*]u8 = @ptrFromInt(@intFromPtr(self.io_buf.alloc_buf.ptr) + self.io_buf.alloc_buf.len - self.size);
+
+                const io_offset = self.offset;
+                // do a 512KB single write at max
+                const io_size = @min(MAX_DIO_SIZE, self.size);
+                self.offset += io_size;
+                self.size -= io_size;
+
+                // Doesn't have to be mutable but stdlib API for prep_write_fixed is wrong
+                var iovec = std.posix.iovec{
+                    .base = io_buf_ptr,
+                    .len = io_size,
+                };
+
+                var sqe = std.mem.zeroes(linux.io_uring_sqe);
+                sqe.prep_write_fixed(&sqe, self.fd, &iovec, io_offset, 0);
+                self.io_id = try ctx.queue_io(true, sqe);
+                self.io_size[io_idx] = io_size;
+                self.io_is_running[io_idx] = true;
+            }
+        }
+
+        return .pending;
+    }
+};
+
 pub const DioRead = struct {
-    const CONCURRENCY = 4;
+    const CONCURRENCY = DIO_CONCURRENCY;
 
     fd: linux.fd_t,
 
@@ -69,6 +157,7 @@ pub const DioRead = struct {
             .size = size,
             .io_id = undefined,
             .io_is_running = std.mem.zeroes([CONCURRENCY]bool),
+            .io_size = undefined,
             .io_buf = null,
         };
     }
@@ -137,7 +226,7 @@ pub const DioRead = struct {
 
                 const io_offset = self.offset;
                 // do a 512KB single read at max
-                const io_size = @min(1 << 19, self.size);
+                const io_size = @min(MAX_DIO_SIZE, self.size);
                 self.offset += io_size;
                 self.size -= io_size;
 
