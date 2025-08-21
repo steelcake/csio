@@ -36,6 +36,10 @@ pub const DioFile = struct {
             .size = size,
         };
     }
+
+    pub fn multi_read(self: *const DioFile, io_vecs: []const IoVec) DioMultiRead {
+
+    }
 };
 
 fn align_forward(addr: usize, alignment: usize) usize {
@@ -52,108 +56,39 @@ pub const DioRead = struct {
     fd: linux.fd_t,
 
     // Record current pending io state
-    io_id: [CONCURRENCY]u64,
-    io_is_running: [CONCURRENCY]bool,
-    // For retrying if a single op fails
-    // io_offset: [CONCURRENCY]u64,
-    // io_size: [CONCURRENCY]u32,
-    // io_is_retried: [CONCURRENCY]bool,
+    io_ids: [CONCURRENCY]u64,
+    io_running: [CONCURRENCY]bool,
+    io_offset: [CONCURRENCY]u64,
+    io_size: [CONCURRENCY]u32,
 
     io_buf: ?DioBuf,
 
-    // These are modified as IO is issued
+    // These are modified as IO finishes
     offset: u64,
     size: u32,
 
-    fn init(fd: linux.fd_t, offset: u64, size: u32) DioRead {
-        return .{
-            .fd = fd,
-            .offset = offset,
-            .size = size,
-            .io_id = undefined,
-            .io_is_running = std.mem.zeroes([CONCURRENCY]bool),
-            .io_buf = null,
-        };
-    }
-
     pub fn poll(self: *DioRead, ctx: Context) PollResult(!DioBuf) {
-        const io_buf: DioBuf = if (self.io_buf) |iob| iob else setup_io_buf: {
-            if (self.size == 0) {
-                return .{ .ready = DioBuf{
-                    .alloc = ctx.io_alloc,
-                    .alloc_buf = &.{},
-                    .data_start = 0,
-                    .data_offset = 0,
-                } };
-            }
-
+        // Setup the buffer if it isn't setup already
+        if (self.io_buf == null) {
             const read_offset = align_backward(self.offset, IoAlloc.ALIGN);
             const read_size = align_forward(self.size, IoAlloc.ALIGN) + (self.offset - read_offset);
-            const buf = DioBuf{
+            self.io_buf = DioBuf {
                 .alloc_buf = try ctx.io_alloc.alloc(read_size),
-                .alloc = ctx.io_alloc,
+                .alloc = ctx.io_alloc, 
                 .data_start = self.offset - read_offset,
                 .data_end = (self.offset - read_offset) + self.size,
             };
-            self.io_buf = buf;
 
             self.offset = read_offset;
             self.size = read_size;
-
-            break :setup_io_buf buf;
-        };
-
-        // check if any io is finished and count pending io
-        var num_pending: u8 = 0;
-        for (0..CONCURRENCY) |io_idx| {
-            if (self.io_is_running[io_idx]) {
-                if (ctx.remove_io_result(self.io_id[io_idx])) |cqe| {
-                    switch (cqe.err()) {
-                        .SUCCESS => {
-                            self.io_running[io_idx] = false;
-                        },
-                        // TODO: retry
-                        else => |e| return e,
-                    }
-                } else {
-                    num_pending += 1;
-                }
-            }
         }
 
-        if (num_pending == 0 and self.size == 0) {
-            return .{ .ready = io_buf };
-        }
 
-        // queue new io
-        for (0..CONCURRENCY) |io_idx| {
-            if (self.size == 0) {
-                break;
-            }
-
-            if (!self.io_is_running[io_idx]) {
-                const io_buf_ptr: [*]u8 = @ptrFromInt(@intFromPtr(io_buf.alloc_buf.ptr) + io_buf.alloc_buf.len - self.size);
-
-                const io_offset = self.offset;
-                // do a 512KB single read at max
-                const io_size = @min(1 << 19, self.size);
-                self.offset += io_size;
-                self.size -= io_size;
-
-                // Doesn't have to be mutable but stdlib API for prep_read_fixed is wrong
-                var iovec = std.posix.iovec{
-                    .base = io_buf_ptr,
-                    .len = io_size,
-                };
-
-                var sqe = std.mem.zeroes(linux.io_uring_sqe);
-                sqe.prep_read_fixed(&sqe, self.fd, &iovec, io_offset, 0);
-                self.io_id = try ctx.queue_io(true, sqe);
-            }
-        }
-
-        return .pending;
     }
+};
+
+pub const DioMultiRead = struct {
+
 };
 
 pub const DioBuf = struct {
@@ -311,7 +246,6 @@ pub const Read = struct {
     io_id: ?u64,
 
     pub fn poll(self: *Read, ctx: Context) PollResult(!usize) {
-        // TODO: retry
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
                 switch (cqe.err()) {

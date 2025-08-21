@@ -2,16 +2,16 @@ const std = @import("std");
 const Alignment = std.mem.Alignment;
 const Allocator = std.mem.Allocator;
 
-const ALIGN_B = 512;
-const ALIGN = Alignment.fromByteUnits(ALIGN_B);
-
 pub const IoAlloc = struct {
+    pub const ALIGN_B = 512;
+    pub const ALIGN = Alignment.fromByteUnits(ALIGN_B);
+
     free_sizes: []u32,
     free_ptrs: [][*]align(ALIGN) u8,
     num_free: u16,
-    buf: []align(ALIGN)u8,
+    buf: []align(ALIGN) u8,
 
-    pub fn init(capacity: u32, num_slots: u16, allocator: Allocator) error {OutOfMemory}!IoAlloc {
+    pub fn init(capacity: u32, num_slots: u16, allocator: Allocator) error{OutOfMemory}!IoAlloc {
         if (capacity == 0 or num_slots == 0) {
             return .{
                 .free_sizes = &.{},
@@ -27,7 +27,7 @@ pub const IoAlloc = struct {
         errdefer allocator.free(buf);
         const free_sizes = try allocator.alloc(u32, num_slots);
         errdefer allocator.free(free_sizes);
-        const free_ptrs = try allocator.alloc([*]align(ALIGN)u8, num_slots);
+        const free_ptrs = try allocator.alloc([*]align(ALIGN) u8, num_slots);
         errdefer allocator.free(free_ptrs);
 
         free_sizes[0] = cap;
@@ -47,7 +47,11 @@ pub const IoAlloc = struct {
         allocator.free(self.buf);
     }
 
-    pub fn alloc(self: *IoAlloc, len: u32) error {OutOfMemory}![]align(ALIGN)u8 {
+    pub fn alloc(self: *IoAlloc, len: u32) error{OutOfIOMemory}![]align(ALIGN) u8 {
+        if (len == 0) {
+            return &.{};
+        }
+
         std.debug.assert(len % ALIGN_B == 0);
 
         // find first sufficient slot
@@ -87,36 +91,44 @@ pub const IoAlloc = struct {
         return out;
     }
 
-    pub fn free(self: *IoAlloc, slice: []align(ALIGN)u8) void {
+    pub fn free(self: *IoAlloc, slice: []align(ALIGN) u8) void {
+        if (slice.len == 0) {
+            return;
+        }
+
         std.debug.assert(slice.len % ALIGN_B == 0);
 
-        const start = @intFromPtr(slice.ptr);
-        const end = start + slice.len;
+        var addr = @intFromPtr(slice.ptr);
+        var size = slice.len;
 
+        // Merge the adjacent free slots together with the new slot.
+        // There can be one left and one right free slot adjacent to the one we are freeing now.
         var idx: u16 = 0;
-        while (idx < self.num_free) : (idx += 1) {
-            const ptr = @intFromPtr(self.free_ptrs.ptr[idx]);
-            const size = self.free_sizes.ptr[idx];
+        while (idx < self.num_free) {
+            const slot_addr = @intFromPtr(self.free_ptrs.ptr[idx]);
+            const slot_size = self.free_sizes.ptr[idx];
 
-            if (ptr == end) {
-                // merge from left
-                self.free_ptrs.ptr[idx] = @ptrFromInt(start);
-                self.free_sizes.ptr[idx] = size + @as(u32, @intCast(slice.len));
-                break;
-            } else if (ptr + size == end) {
-                // merge from right
-                self.free_sizes.ptr[idx] = size + @as(u32, @intCast(slice.len));
-                break;
+            if (slot_addr == addr + size) {
+                size +%= slot_size;
+                self.num_free -%= 1;
+                self.free_ptrs.ptr[idx] = self.free_ptrs.ptr[self.num_free];
+                self.free_sizes.ptr[idx] = self.free_sizes.ptr[self.num_free];
+            } else if (slot_addr + slot_size == addr) {
+                addr = slot_addr;
+                self.num_free -%= 1;
+                self.free_ptrs.ptr[idx] = self.free_ptrs.ptr[self.num_free];
+                self.free_sizes.ptr[idx] = self.free_sizes.ptr[self.num_free];
+            } else {
+                idx +%= 1;
             }
-        } else {
-            // insert new slot if couldn't find an adjacent free slot
-            std.debug.assert(self.num_free < self.free_ptrs.len);
-            std.debug.assert(@intFromPtr(slice.ptr) >= @intFromPtr(self.buf.ptr));
-            std.debug.assert(@intFromPtr(slice.ptr) + slice.len <= @intFromPtr(self.buf.ptr) + self.buf.len);
-
-            self.free_ptrs.ptr[self.num_free] = slice.ptr;
-            self.free_sizes.ptr[self.num_free] = @intCast(slice.len);
-            self.num_free += 1;
         }
+
+        // insert new slot
+        std.debug.assert(self.num_free < self.free_ptrs.len);
+        std.debug.assert(addr >= @intFromPtr(self.buf.ptr));
+        std.debug.assert(addr + size <= @intFromPtr(self.buf.ptr) + self.buf.len);
+        self.free_ptrs.ptr[self.num_free] = @ptrFromInt(addr);
+        self.free_sizes.ptr[self.num_free] = @intCast(size);
+        self.num_free += 1;
     }
 };

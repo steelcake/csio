@@ -5,7 +5,7 @@ const linux = std.os.linux;
 const slab_mod = @import("./slab.zig");
 const Slab = slab_mod.Slab;
 const SlabKey = slab_mod.Key;
-
+const IoAlloc = @import("./io_alloc.zig").IoAlloc;
 const SliceMap = @import("./slice_map.zig").SliceMap;
 const Queue = @import("./queue.zig").Queue;
 
@@ -28,8 +28,9 @@ pub const Context = struct {
     io: *Slab(SlabKey),
     to_notify: *SliceMap(SlabKey, void),
     preempt_duration_ns: u64,
+    io_alloc: *IoAlloc,
 
-    pub fn queue_io(self: *Context, polled: bool, io: linux.io_uring_sqe) error{OutOfIoCapacity}!u64 {
+    pub fn queue_io(self: *const Context, polled: bool, io: linux.io_uring_sqe) error{OutOfIoCapacity}!u64 {
         const entry = self.task_entry;
         if (entry.num_pending_io + entry.num_finished_io == MAX_IO_PER_TASK) {
             return error.OutOfCapacity;
@@ -48,7 +49,7 @@ pub const Context = struct {
         return io_id;
     }
 
-    pub fn remove_io_result(self: *Context, io_id: u64) ?linux.io_uring_cqe {
+    pub fn remove_io_result(self: *const Context, io_id: u64) ?linux.io_uring_cqe {
         for (self.task_entry.finished_io[0..self.task_entry.num_finished_io], 0..) |cqe, idx| {
             if (cqe.user_data == io_id) {
                 self.task_entry.num_finished_io -= 1;

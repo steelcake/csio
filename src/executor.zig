@@ -42,7 +42,7 @@ pub const Executor = struct {
         preempt_duration_ns: u64 = 10 * 1000 * 1000,
         wq_fd: ?linux.fd_t,
         alloc: Allocator,
-    }) error{ OutOfMemory, IoUringSetupFail }!Self {
+    }) error{ OutOfMemory, IoUringSetupFail, RegisterBuffersFail }!Self {
         const max_io = params.max_num_tasks * MAX_IO_PER_TASK;
 
         const io_alloc = try IoAlloc.init(params.io_alloc_capacity, max_io, params.alloc);
@@ -64,6 +64,15 @@ pub const Executor = struct {
             .polled_io = true,
             .alloc = params.alloc,
         });
+
+        polled_io_ring.ring.register_buffers(&.{
+            std.posix.iovec{
+                .base = io_alloc.buf.ptr,
+                .len = io_alloc.buf.len,
+            },
+        }) catch {
+            return error.RegisterBuffersFail;
+        };
 
         const io = try Slab(u64).init(max_io, params.alloc);
         const tasks = try Slab(Task).init(params.max_num_tasks, params.alloc);
@@ -87,6 +96,8 @@ pub const Executor = struct {
 
     pub fn deinit(self: *Self, alloc: Allocator) void {
         std.debug.assert(self.tasks.is_empty());
+        std.debug.assert(self.to_notify.is_empty());
+        std.debug.assert(self.io.is_empty());
 
         self.io_ring.deinit(alloc);
         self.polled_io_ring.deinit(alloc);
@@ -132,6 +143,7 @@ pub const Executor = struct {
                             .io_queue = &self.io_ring.io_queue,
                             .polled_io_queue = &self.polled_io_ring.io_queue,
                             .task_entry = entry,
+                            .io_alloc = &self.io_alloc,
                         });
                         switch (poll_res) {
                             .ready => entry.finished_execution = true,
@@ -220,9 +232,10 @@ const IoUring = struct {
 
     fn deinit(self: Self, alloc: Allocator) void {
         std.debug.assert(self.pending_io == 0);
+        std.debug.assert(self.io_queue.is_empty());
+
         self.ring.deinit();
         self.io_queue.deinit(alloc);
-        self.io_results.deinit(alloc);
         self.io_submit_time.deinit(alloc);
     }
 
