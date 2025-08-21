@@ -112,6 +112,9 @@ pub const DioRead = struct {
                             if (n_read < self.io_size[io_idx]) {
                                 return .{ .ready = error.ShortRead };
                             }
+
+                            // maybe n_read can be bigger than the requested size?
+                            // We should panic if this is the case
                             self.io_is_running[io_idx] = false;
                         },
                         else => |e| return .{ .ready = e },
