@@ -197,6 +197,7 @@ pub const File = struct {
             .fd = self.fd,
             .offset = offset,
             .buf = buf,
+            .retried = false,
         };
     }
 
@@ -205,6 +206,7 @@ pub const File = struct {
             .fd = self.fd,
             .offset = offset,
             .buf = buf,
+            .retried = false,
         };
     }
 };
@@ -284,20 +286,44 @@ pub const Write = struct {
 
     io_id: ?u64,
 
-    pub fn poll(self: *Write, ctx: Context) PollResult(!usize) {
+    retried: bool,
+
+    fn init(fd: linux.fd_t, offset: u64, buf: []const u8) Write {
+        return .{
+            .fd = fd,
+            .offset = offset,
+            .buf = buf,
+            .io_id = null,
+            .retried = false,
+        };
+    }
+
+    fn queue_write(self: *Write, ctx: Context) !void {
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        sqe.prep_write(&sqe, self.fd, self.buf, self.offset);
+        self.io_id = try ctx.queue_io(false, sqe);
+    }
+
+    pub fn poll(self: *Write, ctx: Context) PollResult(!void) {
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
                 switch (cqe.err()) {
-                    .SUCCESS => return @intCast(cqe.res),
+                    .SUCCESS => {
+                        const n_written: usize = @intCast(cqe.res);
+                        if (n_written < self.buf.len) {
+                        }
+                        return;
+                    },
+                    .EINT => {
+
+                    },
                     else => |e| return e,
                 }
             } else {
                 return .pending;
             }
         } else {
-            var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_write(&sqe, self.fd, self.buf, self.offset);
-            self.io_id = try ctx.queue_io(false, sqe);
+            try self.queue_write();
             return .pending;
         }
     }
@@ -310,21 +336,55 @@ pub const Read = struct {
 
     io_id: ?u64,
 
-    pub fn poll(self: *Read, ctx: Context) PollResult(!usize) {
-        // TODO: retry
+    retried: bool,
+
+    fn init(fd: linux.fd_t, offset: u64, buf: []u8) Read {
+        return .{
+            .fd = fd,
+            .offset = offset,
+            .buf = buf,
+            .io_id = null,
+            .retried = false,
+        };
+    }
+
+    fn queue_read(self: *Read, ctx: Context) !void {
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        sqe.prep_read(&sqe, self.fd, self.buf, self.offset);
+        self.io_id = try ctx.queue_io(false, sqe);
+    }
+
+    pub fn poll(self: *Read, ctx: Context) PollResult(!void) {
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
                 switch (cqe.err()) {
-                    .SUCCESS => return @intCast(cqe.res),
+                    .SUCCESS => {
+                        const n_read: usize = @intCast(cqe.res);
+                        if (n_read < self.buf.len) {
+                            if (self.retried) {
+                                return error.ShortRead;
+                            }
+                            self.retried = true;
+                            try self.queue_read();
+                            return .pending;
+                        }
+                        return;
+                    },
+                    .EINTR => {
+                        if (self.retried) {
+                            return error.ShortRead;
+                        }
+                        self.retried = true;
+                        self.queue_read(); 
+                        return .pending;
+                    },
                     else => |e| return e,
                 }
             } else {
                 return .pending;
             }
         } else {
-            var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_read(&sqe, self.fd, self.buf, self.offset);
-            self.io_id = try ctx.queue_io(false, sqe);
+            try self.queue_read();
             return .pending;
         }
     }

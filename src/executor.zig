@@ -310,7 +310,16 @@ const IoUring = struct {
     fn maybe_wakeup(self: *Self) void {
         var flags = 0;
         if (self.ring.sq_ring_needs_enter(&flags)) {
-            self.ring.enter(0, 0, flags) catch unreachable;
+            while(true) {
+                self.ring.enter(0, 0, flags) catch |e| {
+                    switch (e) {
+                        .EINT => continue,
+                        else => {
+                            std.debug.panic("failed to wakeup sqpoll thread: {}", e);
+                        },
+                    }
+                };
+            }
         }
     }
 
