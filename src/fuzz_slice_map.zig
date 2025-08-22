@@ -6,17 +6,17 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const SliceMap = @import("./slice_map.zig").SliceMap;
 const FuzzInput = @import("./fuzz_input.zig").FuzzInput;
 
-fn to_fuzz(data: []const u8) !void {
+fn to_fuzz(data: []const u8, alloc: Allocator) !void {
     var input = FuzzInput.init(data);
 
-    var hashmap = HashMap(i8, u8).init(std.heap.page_allocator);
+    var hashmap = HashMap(i8, u8).init(alloc);
     defer hashmap.deinit();
 
     const capacity = try input.int(u8);
     try hashmap.ensureTotalCapacity(capacity);
 
-    var slicemap = try SliceMap(i8, u8).init(capacity, std.heap.page_allocator);
-    defer slicemap.deinit(std.heap.page_allocator);
+    var slicemap = try SliceMap(i8, u8).init(capacity, alloc);
+    defer slicemap.deinit(alloc);
 
     while (true) {
         switch ((try input.int(u8)) % 5) {
@@ -71,12 +71,20 @@ fn to_fuzz(data: []const u8) !void {
     }
 }
 
-fn to_fuzz_wrap(_: void, data: []const u8) anyerror!void {
-    return to_fuzz(data) catch |e| {
+const FuzzContext = struct {
+    arena: *ArenaAllocator,
+};
+
+fn to_fuzz_wrap(ctx: FuzzContext, data: []const u8) anyerror!void {
+    std.debug.assert(ctx.arena.reset(.retain_capacity));
+    return to_fuzz(data, ctx.arena.allocator()) catch |e| {
         if (e == error.ShortInput) return {} else return e;
     };
 }
 
 test "fuzz" {
-    try std.testing.fuzz({}, to_fuzz_wrap, .{});
+    var arena = ArenaAllocator.init(std.heap.page_allocator);
+    try std.testing.fuzz(FuzzContext{
+        .arena = &arena,
+    }, to_fuzz_wrap, .{});
 }
