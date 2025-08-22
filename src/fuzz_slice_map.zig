@@ -12,7 +12,10 @@ fn to_fuzz(data: []const u8) !void {
     var hashmap = HashMap(i8, u8).init(std.heap.page_allocator);
     defer hashmap.deinit();
 
-    var slicemap = try SliceMap(i8, u8).init(try input.int(u8), std.heap.page_allocator);
+    const capacity = try input.int(u8);
+    try hashmap.ensureTotalCapacity(capacity);
+
+    var slicemap = try SliceMap(i8, u8).init(capacity, std.heap.page_allocator);
     defer slicemap.deinit(std.heap.page_allocator);
 
     while (true) {

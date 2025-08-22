@@ -16,7 +16,6 @@ pub const TaskEntry = struct {
     finished_io: [MAX_IO_PER_TASK]linux.io_uring_cqe,
     num_finished_io: u8,
     num_pending_io: u8,
-    finished_execution: bool,
 };
 
 pub const Context = struct {

@@ -131,38 +131,35 @@ pub const Executor = struct {
             // Run tasks
             while (self.to_notify.swap_remove(0)) |task_id| {
                 if (self.tasks.get_mut_ref(task_id)) |entry| {
-                    if (!entry.finished_execution) {
-                        const start = Instant.now();
+                    const start = Instant.now();
 
-                        const poll_res = entry.task.poll(Context{
-                            .task_id = task_id,
-                            .to_notify = &self.to_notify,
-                            .preempt_duration_ns = self.preempt_duration_ns,
-                            .io = &self.io,
-                            .start_t = Instant.now(),
-                            .io_queue = &self.io_ring.io_queue,
-                            .polled_io_queue = &self.polled_io_ring.io_queue,
-                            .task_entry = entry,
-                            .io_alloc = &self.io_alloc,
-                        });
-                        switch (poll_res) {
-                            .ready => entry.finished_execution = true,
-                            .pending => {},
-                        }
-
-                        const now = Instant.now() catch unreachable;
-                        const elapsed = now.since(start);
-                        if (elapsed > self.preempt_duration_ns) {
-                            std.log.warn("A task took more than the configured preempt duration to run. It took {}ms.", .{elapsed / (1000 * 1000)});
-                        }
-
-                        self.drive_io();
-                    } else if (entry.num_pending_io == 0) {
-                        for (entry.finished_io_id[0..entry.num_finished_io]) |finished_io_id| {
-                            self.io.remove(finished_io_id) orelse unreachable;
-                        }
-                        _ = self.tasks.remove(task_id) orelse unreachable;
+                    const poll_res = entry.task.poll(Context{
+                        .task_id = task_id,
+                        .to_notify = &self.to_notify,
+                        .preempt_duration_ns = self.preempt_duration_ns,
+                        .io = &self.io,
+                        .start_t = Instant.now(),
+                        .io_queue = &self.io_ring.io_queue,
+                        .polled_io_queue = &self.polled_io_ring.io_queue,
+                        .task_entry = entry,
+                        .io_alloc = &self.io_alloc,
+                    });
+                    switch (poll_res) {
+                        .ready => {
+                            std.debug.assert(entry.num_finished_io == 0);
+                            std.debug.assert(entry.num_pending_io == 0);
+                            _ = self.tasks.remove(task_id) orelse unreachable;
+                        },
+                        .pending => {},
                     }
+
+                    const now = Instant.now() catch unreachable;
+                    const elapsed = now.since(start);
+                    if (elapsed > self.preempt_duration_ns) {
+                        std.log.warn("A task took more than the configured preempt duration to run. It took {}ms.", .{elapsed / (1000 * 1000)});
+                    }
+
+                    self.drive_io();
                 }
             }
         }
