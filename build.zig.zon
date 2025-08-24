@@ -2,7 +2,7 @@
     .name = .csio,
     .version = "0.0.0",
     .fingerprint = 0x3752fddf0c42401c, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.15.0-dev.936+fc2c1883b",
+    .minimum_zig_version = "0.15.1",
     .dependencies = .{},
     .paths = .{
         "build.zig",

@@ -1,12 +1,17 @@
 const std = @import("std");
-const HashMap = std.AutoHashMap;
+const FixedBufferAllocator = std.heap.FixedBufferAllocator;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const HashMap = std.AutoHashMap;
 
 const SliceMap = @import("./slice_map.zig").SliceMap;
 const FuzzInput = @import("./fuzz_input.zig").FuzzInput;
 
-fn to_fuzz(data: []const u8, alloc: Allocator) !void {
+fn fuzz_queue(data: []const u8, alloc: Allocator) !void {
+
+}
+
+fn fuzz_slicemap(data: []const u8, alloc: Allocator) !void {
     var input = FuzzInput.init(data);
 
     var hashmap = HashMap(i8, u8).init(alloc);
@@ -72,19 +77,39 @@ fn to_fuzz(data: []const u8, alloc: Allocator) !void {
 }
 
 const FuzzContext = struct {
-    arena: *ArenaAllocator,
+    fb_alloc: *FixedBufferAllocator,
 };
 
-fn to_fuzz_wrap(ctx: FuzzContext, data: []const u8) anyerror!void {
-    std.debug.assert(ctx.arena.reset(.retain_capacity));
-    return to_fuzz(data, ctx.arena.allocator()) catch |e| {
+fn run_fuzz_test(comptime fuzz_one: fn (data: []const u8, gpa: Allocator) anyerror!void, data: []const u8, fb_alloc: *FixedBufferAllocator) anyerror!void {
+    fb_alloc.reset();
+
+    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{
+        .backing_allocator_zeroes = false,
+    }){
+        .backing_allocator = fb_alloc.allocator(),
+    };
+    const gpa = general_purpose_allocator.allocator();
+    defer {
+        switch (general_purpose_allocator.deinit()) {
+            .ok => {},
+            .leak => |l| {
+                std.debug.panic("LEAK: {any}", .{l});
+            },
+        }
+    }
+
+    fuzz_one(data, gpa) catch |e| {
         if (e == error.ShortInput) return {} else return e;
     };
 }
 
+fn to_fuzz_wrap(ctx: FuzzContext, data: []const u8) anyerror!void {
+    try run_fuzz_test(fuzz_slicemap, data, ctx.fb_alloc);
+}
+
 test "fuzz" {
-    var arena = ArenaAllocator.init(std.heap.page_allocator);
+    var fb_alloc = FixedBufferAllocator.init(std.heap.page_allocator.alloc(u8, 1 << 20) catch unreachable);
     try std.testing.fuzz(FuzzContext{
-        .arena = &arena,
+        .fb_alloc = &fb_alloc,
     }, to_fuzz_wrap, .{});
 }
