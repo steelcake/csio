@@ -7,6 +7,7 @@ pub fn Queue(comptime T: type) type {
 
         slots: []T,
         start: u32,
+        capacity: u32,
         len: u32,
 
         pub fn init(capacity: u32, alloc: Allocator) error{OutOfMemory}!Self {
@@ -16,6 +17,7 @@ pub fn Queue(comptime T: type) type {
                 .slots = slots,
                 .start = 0,
                 .len = 0,
+                .capacity = capacity,
             };
         }
 
@@ -37,12 +39,12 @@ pub fn Queue(comptime T: type) type {
         }
 
         pub fn push_batch(self: *Self, elems: []const T) error{OutOfCapacity}!void {
-            if (self.len + elems.len > self.slots.len) {
+            if (self.len + elems.len > self.capacity) {
                 return error.OutOfCapacity;
             }
 
             // before wrapping around
-            const n = @min(self.slots.len - self.start, elems.len);
+            const n = @min(self.capacity - self.start, elems.len);
             @memcpy(self.slots[self.start .. self.start + n], elems[0..n]);
 
             // after wrapping around
@@ -51,15 +53,15 @@ pub fn Queue(comptime T: type) type {
                 @memcpy(self.slots[0..m], elems[n..]);
             }
 
-            self.len += elems.len;
+            self.len += @intCast(elems.len);
         }
 
         pub fn push(self: *Self, elem: T) error{OutOfCapacity}!void {
-            if (self.len == self.slots.len) {
+            if (self.len == self.capacity) {
                 return error.OutOfCapacity;
             }
 
-            const end = (self.start + self.len) % self.slots.len;
+            const end = (self.start + self.len) % self.capacity;
             self.slots[end] = elem;
             self.len += 1;
         }
@@ -70,7 +72,7 @@ pub fn Queue(comptime T: type) type {
             }
 
             const elem = self.slots[self.start];
-            self.start = (self.start + 1) % self.slots.len;
+            self.start = (self.start + 1) % self.capacity;
             self.len -= 1;
 
             return elem;

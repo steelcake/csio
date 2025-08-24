@@ -27,7 +27,7 @@ pub fn Slab(comptime T: type) type {
 
             var idx: u32 = 0;
             while (idx < capacity) : (idx += 1) {
-                entries[idx] = .{ .free = idx + 1 };
+                entries[idx] = .{ .free = .{ .next_free = idx + 1 } };
             }
 
             return Self{
@@ -66,7 +66,7 @@ pub fn Slab(comptime T: type) type {
             }
 
             self.entries[key_idx] = Entry{
-                .occupied = val,
+                .occupied = .{ .generation = self.current_generation, .val = val },
             };
 
             self.n_occupied += 1;
