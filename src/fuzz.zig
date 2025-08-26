@@ -71,7 +71,7 @@ fn fuzz_io_alloc(data: []const u8, alloc: Allocator) !void {
         }
 
         for (buffers[0..num_buffers], 0..) |a, idx| {
-            for (buffers[idx..num_buffers]) |b| {
+            for (buffers[idx + 1 .. num_buffers]) |b| {
                 std.debug.assert(!overlaps(a, b));
             }
         }
@@ -93,11 +93,11 @@ fn fuzz_queue(data: []const u8, alloc: Allocator) !void {
     var queue = try Queue(i8).init(capacity, alloc);
     defer queue.deinit(alloc);
 
-    while (true) {
+    while (pop_index < values.len or push_index < values.len) {
         std.debug.assert(push_index <= values.len);
         std.debug.assert(pop_index <= values.len);
 
-        switch ((try input.int(u8)) % 4) {
+        switch ((try input.int(u8)) % 2) {
             // push
             0 => {
                 if (push_index == values.len) {
@@ -112,30 +112,17 @@ fn fuzz_queue(data: []const u8, alloc: Allocator) !void {
 
                 push_index += 1;
             },
-            // push_batch
-            2 => {
-                if (push_index == values.len) {
-                    continue;
-                }
-                const left_capacity = values.len - push_index;
-
-                const batch_size = (try input.int(u8)) % left_capacity;
-
-                const batch = values[push_index .. push_index + batch_size];
-
-                queue.push_batch(batch) catch unreachable;
-
-                push_index += batch_size;
-            },
             // pop
-            3 => {
+            1 => {
                 if (pop_index == values.len) {
+                    std.debug.assert(queue.len == 0 and queue.pop() == null and queue.is_empty());
                     continue;
                 }
 
                 // the queue should be empty
                 if (pop_index == push_index) {
-                    std.debug.assert(queue.pop() == null);
+                    std.debug.assert(queue.len == 0 and queue.pop() == null and queue.is_empty());
+                    continue;
                 }
 
                 const value = values[pop_index];
@@ -190,10 +177,10 @@ fn fuzz_slab(data: []const u8, alloc: Allocator) !void {
                 if (map.len == 0) continue;
                 const index = (try input.int(u8)) % map.len;
                 const key = map.keys[index];
-                const value = map.values[index];
 
                 const slab_value = slab.remove(key) orelse unreachable;
-                std.debug.assert(value == slab_value);
+                const map_value = map.remove(key) orelse unreachable;
+                std.debug.assert(map_value == slab_value);
             },
             // modify in-place
             3 => {

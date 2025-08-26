@@ -8,16 +8,31 @@ pub fn Queue(comptime T: type) type {
         slots: []T,
         start: u32,
         capacity: u32,
+        capacity_mask: u32,
         len: u32,
 
         pub fn init(capacity: u32, alloc: Allocator) error{OutOfMemory}!Self {
-            const slots = try alloc.alloc(T, capacity);
+            if (capacity == 0) {
+                return .{
+                    .slots = &.{},
+                    .start = 0,
+                    .len = 0,
+                    .capacity = 0,
+                    .capacity_mask = 0,
+                };
+            }
+
+            const cap = std.math.ceilPowerOfTwo(u32, capacity) catch unreachable;
+            const mask = cap - 1;
+
+            const slots = try alloc.alloc(T, cap);
 
             return .{
                 .slots = slots,
                 .start = 0,
                 .len = 0,
-                .capacity = capacity,
+                .capacity = cap,
+                .capacity_mask = mask,
             };
         }
 
@@ -38,32 +53,14 @@ pub fn Queue(comptime T: type) type {
             self.len = 0;
         }
 
-        pub fn push_batch(self: *Self, elems: []const T) error{OutOfCapacity}!void {
-            if (self.len + elems.len > self.capacity) {
-                return error.OutOfCapacity;
-            }
-
-            // before wrapping around
-            const n = @min(self.capacity - self.start, elems.len);
-            @memcpy(self.slots[self.start .. self.start + n], elems[0..n]);
-
-            // after wrapping around
-            if (n < elems.len) {
-                const m = elems.len - n;
-                @memcpy(self.slots[0..m], elems[n..]);
-            }
-
-            self.len += @intCast(elems.len);
-        }
-
         pub fn push(self: *Self, elem: T) error{OutOfCapacity}!void {
             if (self.len == self.capacity) {
                 return error.OutOfCapacity;
             }
 
-            const end = (self.start + self.len) % self.capacity;
-            self.slots[end] = elem;
-            self.len += 1;
+            const end = (self.start +% self.len) & self.capacity_mask;
+            self.slots.ptr[end] = elem;
+            self.len +%= 1;
         }
 
         pub fn pop(self: *Self) ?T {
@@ -71,9 +68,9 @@ pub fn Queue(comptime T: type) type {
                 return null;
             }
 
-            const elem = self.slots[self.start];
-            self.start = (self.start + 1) % self.capacity;
-            self.len -= 1;
+            const elem = self.slots.ptr[self.start];
+            self.start = (self.start +% 1) & self.capacity_mask;
+            self.len -%= 1;
 
             return elem;
         }
