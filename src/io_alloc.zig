@@ -3,11 +3,10 @@ const Alignment = std.mem.Alignment;
 const Allocator = std.mem.Allocator;
 
 pub const IoAlloc = struct {
-    pub const ALIGN_B = 512;
-    pub const ALIGN = Alignment.fromByteUnits(ALIGN_B);
+    pub const ALIGN = 512;
 
     free_sizes: []u32,
-    free_ptrs: [][*]align(ALIGN) u8,
+    free_ptrs: []usize,
     num_free: u16,
     buf: []align(ALIGN) u8,
 
@@ -21,17 +20,17 @@ pub const IoAlloc = struct {
             };
         }
 
-        const cap = (capacity + ALIGN_B - 1) / ALIGN_B * ALIGN_B;
+        const cap = (capacity + ALIGN - 1) / ALIGN * ALIGN;
 
-        const buf = try allocator.alignedAlloc(u8, ALIGN_B, cap);
+        const buf = try allocator.alignedAlloc(u8, Alignment.fromByteUnits(ALIGN), cap);
         errdefer allocator.free(buf);
         const free_sizes = try allocator.alloc(u32, num_slots);
         errdefer allocator.free(free_sizes);
-        const free_ptrs = try allocator.alloc([*]align(ALIGN) u8, num_slots);
+        const free_ptrs = try allocator.alloc(usize, num_slots);
         errdefer allocator.free(free_ptrs);
 
         free_sizes[0] = cap;
-        free_ptrs[0] = buf.ptr;
+        free_ptrs[0] = @intFromPtr(buf.ptr);
 
         return .{
             .free_sizes = free_sizes,
@@ -52,7 +51,7 @@ pub const IoAlloc = struct {
             return &.{};
         }
 
-        std.debug.assert(len % ALIGN_B == 0);
+        std.debug.assert(len % ALIGN == 0);
 
         // find first sufficient slot
         var idx: u16 = 0;
@@ -62,7 +61,7 @@ pub const IoAlloc = struct {
                 break idx;
             }
         } else {
-            return error.OutOfMemory;
+            return error.OutOfIOMemory;
         };
 
         // find the smallest slot that is sufficient
@@ -75,7 +74,7 @@ pub const IoAlloc = struct {
             }
         }
 
-        const out = self.free_ptrs.ptr[min_idx][0..len];
+        const out = @as([*]align(ALIGN) u8, @ptrFromInt(self.free_ptrs.ptr[min_idx]))[0..len];
 
         if (min_size == len) {
             // swap-remove the slot from free-list
@@ -85,7 +84,7 @@ pub const IoAlloc = struct {
         } else {
             // shrink the slot in place
             self.free_sizes.ptr[min_idx] = min_size - len;
-            self.free_ptrs.ptr[min_idx] = out.ptr[len..];
+            self.free_ptrs.ptr[min_idx] = @intFromPtr(out.ptr[len..]);
         }
 
         @memset(out, 0);
@@ -98,7 +97,7 @@ pub const IoAlloc = struct {
             return;
         }
 
-        std.debug.assert(slice.len % ALIGN_B == 0);
+        std.debug.assert(slice.len % ALIGN == 0);
 
         var addr = @intFromPtr(slice.ptr);
         var size = slice.len;
@@ -107,7 +106,7 @@ pub const IoAlloc = struct {
         // There can be one left and one right free slot adjacent to the one we are freeing now.
         var idx: u16 = 0;
         while (idx < self.num_free) {
-            const slot_addr = @intFromPtr(self.free_ptrs.ptr[idx]);
+            const slot_addr = self.free_ptrs.ptr[idx];
             const slot_size = self.free_sizes.ptr[idx];
 
             if (slot_addr == addr + size) {
@@ -129,7 +128,7 @@ pub const IoAlloc = struct {
         std.debug.assert(self.num_free < self.free_ptrs.len);
         std.debug.assert(addr >= @intFromPtr(self.buf.ptr));
         std.debug.assert(addr + size <= @intFromPtr(self.buf.ptr) + self.buf.len);
-        self.free_ptrs.ptr[self.num_free] = @ptrFromInt(addr);
+        self.free_ptrs.ptr[self.num_free] = addr;
         self.free_sizes.ptr[self.num_free] = @intCast(size);
         self.num_free += 1;
     }

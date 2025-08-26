@@ -7,8 +7,76 @@ const HashMap = std.AutoHashMap;
 const SliceMap = @import("./slice_map.zig").SliceMap;
 const Slab = @import("./slab.zig").Slab;
 const Queue = @import("./queue.zig").Queue;
+const IoAlloc = @import("./io_alloc.zig").IoAlloc;
 
 const FuzzInput = @import("./fuzz_input.zig").FuzzInput;
+
+// check if two slices overlap
+fn overlaps(a: []const u8, b: []const u8) bool {
+    const a_start_addr = @intFromPtr(a.ptr);
+    const a_end_addr = a_start_addr + a.len;
+    const b_start_addr = @intFromPtr(b.ptr);
+    const b_end_addr = b_start_addr + b.len;
+
+    return (a_start_addr >= b_start_addr and a_start_addr < b_end_addr) or (b_start_addr >= a_start_addr and b_start_addr < a_end_addr);
+}
+
+fn fuzz_io_alloc(data: []const u8, alloc: Allocator) !void {
+    var input = FuzzInput.init(data);
+
+    const num_slots = try input.int(u8);
+    const capacity = (try input.int(u32)) % (1 << 21);
+
+    var io_alloc = try IoAlloc.init(capacity, num_slots, alloc);
+    defer io_alloc.deinit(alloc);
+
+    const buffers = try alloc.alloc([]align(IoAlloc.ALIGN) u8, num_slots);
+    defer alloc.free(buffers);
+    var num_buffers: u32 = 0;
+
+    defer for (buffers[0..num_buffers]) |buf| {
+        io_alloc.free(buf);
+    };
+
+    while (true) {
+        switch ((try input.int(u8)) % 2) {
+            // alloc
+            0 => {
+                if (num_buffers == num_slots) {
+                    continue;
+                }
+
+                const size = (try input.int(u16)) % capacity;
+                const aligned_size = (size + IoAlloc.ALIGN - 1) / IoAlloc.ALIGN * IoAlloc.ALIGN;
+
+                const buf = io_alloc.alloc(aligned_size) catch continue;
+
+                buffers[num_buffers] = buf;
+                num_buffers += 1;
+            },
+            // free
+            1 => {
+                if (num_buffers == 0) {
+                    continue;
+                }
+
+                const index = (try input.int(u8)) % num_buffers;
+                const buf = buffers[index];
+                num_buffers -= 1;
+                buffers[index] = buffers[num_buffers];
+
+                io_alloc.free(buf);
+            },
+            else => unreachable,
+        }
+
+        for (buffers[0..num_buffers], 0..) |a, idx| {
+            for (buffers[idx..num_buffers]) |b| {
+                std.debug.assert(!overlaps(a, b));
+            }
+        }
+    }
+}
 
 fn fuzz_queue(data: []const u8, alloc: Allocator) !void {
     var input = FuzzInput.init(data);
@@ -243,10 +311,11 @@ fn to_fuzz_wrap(ctx: FuzzContext, data: []const u8) anyerror!void {
     try run_fuzz_test(fuzz_slicemap, data, ctx.fb_alloc);
     try run_fuzz_test(fuzz_slab, data, ctx.fb_alloc);
     try run_fuzz_test(fuzz_queue, data, ctx.fb_alloc);
+    try run_fuzz_test(fuzz_io_alloc, data, ctx.fb_alloc);
 }
 
 test "fuzz" {
-    var fb_alloc = FixedBufferAllocator.init(std.heap.page_allocator.alloc(u8, 1 << 20) catch unreachable);
+    var fb_alloc = FixedBufferAllocator.init(std.heap.page_allocator.alloc(u8, 1 << 22) catch unreachable);
     try std.testing.fuzz(FuzzContext{
         .fb_alloc = &fb_alloc,
     }, to_fuzz_wrap, .{});
