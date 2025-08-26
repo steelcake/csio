@@ -244,7 +244,7 @@ const IoUring = struct {
         }
     }
 
-    pub fn push_cqe(entry: *TaskEntry, cqe: linux.io_uring_cqe) void {
+    pub fn handle_cqe(entry: *TaskEntry, cqe: linux.io_uring_cqe) void {
         std.debug.assert(entry.num_finished_io < MAX_IO_PER_TASK);
         entry.finished_io[entry.num_finished_io] = cqe;
         entry.num_finished_io += 1;
@@ -265,7 +265,7 @@ const IoUring = struct {
 
             const task_id = io.get(cqe.user_data) orelse unreachable;
             const entry = tasks.get_mut_ref(task_id) orelse unreachable;
-            push_cqe(entry, cqe);
+            handle_cqe(entry, cqe);
             _ = to_notify.insert(task_id, {}) catch unreachable;
         }
 
@@ -277,7 +277,7 @@ const IoUring = struct {
 
                 const task_id = io.get(cqe.user_data) orelse unreachable;
                 const entry = tasks.get_mut_ref(task_id) orelse unreachable;
-                push_cqe(entry, cqe);
+                handle_cqe(entry, cqe);
                 _ = to_notify.insert(task_id, {}) catch unreachable;
             }
         }

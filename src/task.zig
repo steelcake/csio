@@ -9,7 +9,7 @@ const IoAlloc = @import("./io_alloc.zig").IoAlloc;
 const SliceMap = @import("./slice_map.zig").SliceMap;
 const Queue = @import("./queue.zig").Queue;
 
-pub const MAX_IO_PER_TASK = 128;
+pub const MAX_IO_PER_TASK = 256;
 
 pub const TaskEntry = struct {
     task: Task,
@@ -29,11 +29,12 @@ pub const Context = struct {
     preempt_duration_ns: u64,
     io_alloc: *IoAlloc,
 
-    pub fn queue_io(self: *const Context, polled: bool, io: linux.io_uring_sqe) error{OutOfIoCapacity}!u64 {
+    pub fn queue_io(self: *const Context, polled: bool, io: linux.io_uring_sqe) u64 {
         const entry = self.task_entry;
-        if (entry.num_pending_io + entry.num_finished_io == MAX_IO_PER_TASK) {
-            return error.OutOfCapacity;
-        }
+
+        std.debug.assert(entry.num_pending_io + entry.num_finished_io < MAX_IO_PER_TASK);
+
+        entry.num_pending_io += 1;
 
         var sqe = io;
         const io_id = self.io.insert(self.task_id);
