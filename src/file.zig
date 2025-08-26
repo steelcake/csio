@@ -25,6 +25,15 @@ pub const DioFile = struct {
         };
     }
 
+    pub fn fallocate(self: *const DioFile, mode: i32, offset: u64, size: u64) FAllocate {
+        return .{
+            .fd = self.fd,
+            .mode = mode,
+            .offset = offset,
+            .size = size,
+        };
+    }
+
     pub fn read(self: *const DioFile, offset: u64, size: u32) DioRead {
         return DioRead.init(self.fd, offset, size);
     }
@@ -173,11 +182,10 @@ pub const DioWrite = union(enum) {
 
                             const io_offset: u64 = s.file_offset + s.offset;
 
-                            // do a 512KB single read at max
                             const io_size = @min(MAX_DIO_SIZE, s.io_buf.size() - s.offset);
                             s.offset += io_size;
 
-                            // Doesn't have to be mutable but stdlib API for prep_read_fixed is wrong
+                            // Doesn't have to be mutable but stdlib API for prep_write_fixed is wrong
                             var iovec = std.posix.iovec{
                                 .base = io_buf_ptr,
                                 .len = io_size,
@@ -341,7 +349,6 @@ pub const DioRead = union(enum) {
                             const io_buf_ptr: [*]u8 = @ptrFromInt(@intFromPtr(s.io_buf.alloc_buf.ptr) + s.io_buf.alloc_buf.len - self.size);
 
                             const io_offset = s.offset;
-                            // do a 512KB single read at max
                             const io_size = @min(MAX_DIO_SIZE, s.size);
                             s.offset += io_size;
                             s.size -= io_size;
@@ -443,6 +450,15 @@ pub const File = struct {
             .offset = offset,
             .buf = buf,
             .retried = false,
+        };
+    }
+
+    pub fn fallocate(self: *const File, mode: i32, offset: u64, size: u64) FAllocate {
+        return .{
+            .fd = self.fd,
+            .mode = mode,
+            .offset = offset,
+            .size = size,
         };
     }
 };
@@ -611,6 +627,36 @@ pub const Close = struct {
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
             sqe.prep_close(self.fd);
+            self.io_id = ctx.queue_io(false, sqe);
+            return .pending;
+        }
+    }
+};
+
+pub const FAllocate = struct {
+    fd: linux.fd_t,
+    mode: i32,
+    offset: u64,
+    size: u64,
+
+    io_id: ?u64,
+
+    pub fn poll(self: *FAllocate, ctx: Context) PollResult(linux.E!void) {
+        if (self.io_id) |io_id| {
+            if (ctx.remove_io_result(io_id)) |cqe| {
+                switch (cqe.err()) {
+                    .SUCCESS => {
+                        std.debug.assert(cqe.res == 0);
+                        return .{ .ready = {} };
+                    },
+                    else => |e| return .{ .ready = e },
+                }
+            } else {
+                return .pending;
+            }
+        } else {
+            var sqe = std.mem.zeroes(linux.io_uring_sqe);
+            sqe.prep_fallocate(self.fd, self.mode, self.offset, self.size);
             self.io_id = ctx.queue_io(false, sqe);
             return .pending;
         }
