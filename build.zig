@@ -33,4 +33,19 @@ pub fn build(b: *std.Build) void {
 
     const fuzz_step = b.step("fuzz", "run fuzz tests");
     fuzz_step.dependOn(&run_fuzz.step);
+
+    const diorw = b.addExecutable(.{
+        .name = "diorw",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/diorw.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    diorw.root_module.addImport("csio", mod);
+
+    const run_diorw = b.addRunArtifact(diorw);
+
+    const diorw_step = b.step("diorw", "run diorw example");
+    diorw_step.dependOn(&run_diorw.step);
 }
