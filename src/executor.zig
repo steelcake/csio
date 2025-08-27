@@ -171,7 +171,7 @@ pub const Executor = struct {
     }
 };
 
-const IoUring = struct {
+pub const IoUring = struct {
     const Self = @This();
 
     ring: linux.IoUring,
@@ -272,8 +272,27 @@ const IoUring = struct {
         self.pending_io -= ready;
     }
 
+    pub fn push(self: *Self, sqe: linux.io_uring_sqe) void {
+        while (true) {
+            switch (self.ring.get_sqe()) {
+                .ok => |sqe_ptr| {
+                    if (self.io_queue.pop()) |queued_sqe| {
+                        sqe_ptr.* = queued_sqe;
+                    } else {
+                        sqe_ptr.* = sqe;
+                        return;
+                    }
+                },
+                .err => {
+                    self.io_queue.push(sqe) catch unreachable;
+                    return;
+                },
+            }
+        }
+    }
+
     fn sync_sq(self: *Self) void {
-        for (0..self.io_queue.length()) |_| {
+        while (self.io_queue.len > 0) {
             switch (self.ring.get_sqe()) {
                 .ok => |sqe_ptr| {
                     self.pending_io += 1;

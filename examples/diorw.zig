@@ -124,3 +124,25 @@ const MainTask = union(enum) {
         };
     }
 };
+
+const OpenFile = union(enum) {
+    start,
+    remove,
+    open,
+    fallocate,
+    finished,
+};
+
+const WriteFile = union(enum) {
+    start,
+    write,
+    fail,
+    finished,
+};
+
+const ReadFile = union(enum) {
+    start,
+    read,
+    fail,
+    finished,
+};

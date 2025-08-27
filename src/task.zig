@@ -8,6 +8,7 @@ const SlabKey = slab_mod.Key;
 const IoAlloc = @import("./io_alloc.zig").IoAlloc;
 const SliceMap = @import("./slice_map.zig").SliceMap;
 const Queue = @import("./queue.zig").Queue;
+const IoUring = @import("./executor.zig").IoUring;
 
 pub const MAX_IO_PER_TASK = 256;
 
@@ -22,8 +23,8 @@ pub const Context = struct {
     start_t: Instant,
     task_id: u32,
     task_entry: *TaskEntry,
-    io_queue: *Queue(linux.io_uring_sqe),
-    polled_io_queue: *Queue(linux.io_uring_sqe),
+    ring: *IoUring,
+    polled_ring: *IoUring,
     io: *Slab(SlabKey),
     to_notify: *SliceMap(SlabKey, void),
     preempt_duration_ns: u64,
@@ -41,9 +42,9 @@ pub const Context = struct {
         sqe.user_data = io_id;
 
         if (polled) {
-            self.polled_io_queue.push(sqe) catch unreachable;
+            self.polled_ring.push(sqe);
         } else {
-            self.io_queue.push(sqe) catch unreachable;
+            self.ring.push(sqe);
         }
 
         return io_id;

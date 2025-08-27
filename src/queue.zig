@@ -40,10 +40,6 @@ pub fn Queue(comptime T: type) type {
             alloc.free(self.slots);
         }
 
-        pub fn length(self: *const Self) u32 {
-            return self.len;
-        }
-
         pub fn is_empty(self: *const Self) bool {
             return self.len == 0;
         }
