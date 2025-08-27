@@ -58,6 +58,7 @@ pub const FuzzInput = struct {
 
     pub fn slice(self: *FuzzInput, comptime T: type, len: u32, alloc: Allocator) Error![]T {
         const out = try alloc.alloc(T, len);
+        errdefer alloc.free(out);
         const out_raw: []u8 = @ptrCast(out);
         @memcpy(out_raw, try self.bytes(@intCast(out_raw.len)));
         return out;

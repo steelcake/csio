@@ -1,9 +1,15 @@
 const slab = @import("./slab.zig");
 const slice_map = @import("./slice_map.zig");
 const queue = @import("./queue.zig");
-pub const task = @import("./task.zig");
-pub const executor = @import("./executor.zig");
+const task = @import("./task.zig");
+const executor = @import("./executor.zig");
+
 pub const fs = @import("./fs.zig");
+pub const Executor = executor.Executor;
+pub const Task = task.Task;
+pub const Context = task.Context;
+pub const PollResult = task.PollResult;
+pub const MAX_IO_PER_TASK = task.MAX_IO_PER_TASK;
 
 test {
     _ = task;

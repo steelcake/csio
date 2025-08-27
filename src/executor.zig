@@ -130,37 +130,38 @@ pub const Executor = struct {
 
             // Run tasks
             while (self.to_notify.swap_remove(0)) |task_id| {
-                if (self.tasks.get_mut_ref(task_id)) |entry| {
-                    const start = Instant.now();
+                // it is illegal to notify finished tasks
+                const entry = self.tasks.get_mut_ref(task_id) orelse unreachable;
 
-                    const poll_res = entry.task.poll(Context{
-                        .task_id = task_id,
-                        .to_notify = &self.to_notify,
-                        .preempt_duration_ns = self.preempt_duration_ns,
-                        .io = &self.io,
-                        .start_t = start,
-                        .ring = &self.io_ring,
-                        .polled_ring = &self.polled_io_ring,
-                        .task_entry = entry,
-                        .io_alloc = &self.io_alloc,
-                    });
-                    switch (poll_res) {
-                        .ready => {
-                            std.debug.assert(entry.num_finished_io == 0);
-                            std.debug.assert(entry.num_pending_io == 0);
-                            _ = self.tasks.remove(task_id) orelse unreachable;
-                        },
-                        .pending => {},
-                    }
+                const start = Instant.now() catch unreachable;
 
-                    const now = Instant.now() catch unreachable;
-                    const elapsed = now.since(start);
-                    if (elapsed > self.preempt_duration_ns) {
-                        std.log.warn("A task took more than the configured preempt duration to run. It took {}ms.", .{elapsed / (1000 * 1000)});
-                    }
-
-                    self.drive_io();
+                const poll_res = entry.task.poll(Context{
+                    .task_id = task_id,
+                    .to_notify = &self.to_notify,
+                    .preempt_duration_ns = self.preempt_duration_ns,
+                    .io = &self.io,
+                    .start_t = start,
+                    .ring = &self.io_ring,
+                    .polled_ring = &self.polled_io_ring,
+                    .task_entry = entry,
+                    .io_alloc = &self.io_alloc,
+                });
+                switch (poll_res) {
+                    .ready => {
+                        std.debug.assert(entry.num_finished_io == 0);
+                        std.debug.assert(entry.num_pending_io == 0);
+                        _ = self.tasks.remove(task_id) orelse unreachable;
+                    },
+                    .pending => {},
                 }
+
+                const now = Instant.now() catch unreachable;
+                const elapsed = now.since(start);
+                if (elapsed > self.preempt_duration_ns) {
+                    std.log.warn("A task took more than the configured preempt duration to run. It took {}ms.", .{elapsed / (1000 * 1000)});
+                }
+
+                self.drive_io();
             }
         }
     }
@@ -228,14 +229,6 @@ pub const IoUring = struct {
 
         self.ring.deinit();
         self.io_queue.deinit(alloc);
-    }
-
-    fn maybe_warn_io_time(now: Instant, start: Instant) void {
-        const io_time_threshold_ns = 50 * 1000 * 1000;
-        const elapsed = now.since(start);
-        if (elapsed > io_time_threshold_ns) {
-            std.log.warn("an io command has been running for {}ms", .{elapsed / (1000 * 1000)});
-        }
     }
 
     fn handle_cqe(entry: *TaskEntry, cqe: linux.io_uring_cqe) void {

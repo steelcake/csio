@@ -5,7 +5,6 @@ const Instant = std.time.Instant;
 
 const csio = @import("csio");
 const fs = csio.fs;
-const task = csio.task;
 
 pub fn main() !void {
     const mem = std.heap.page_allocator.alloc(1 << 30);
@@ -18,6 +17,7 @@ pub fn main() !void {
         .wq_fd = null,
         .alloc = alloc,
     });
+    defer exec.deinit(alloc);
 
     const main_task = MainTask.init();
     exec.run(main_task.task());
@@ -47,7 +47,7 @@ const MainTask = struct {
         };
     }
 
-    fn poll(self: *Self, ctx: csio.task.Context) csio.task.PollResult(void) {
+    fn poll(self: *Self, ctx: csio.Context) csio.PollResult(void) {
         while (true) {
             switch (self.*) {
                 .init => {
@@ -76,12 +76,12 @@ const MainTask = struct {
         }
     }
 
-    fn poll_fn(ptr: *anyopaque, ctx: csio.task.Context) csio.task.PollResult(void) {
+    fn poll_fn(ptr: *anyopaque, ctx: csio.Context) csio.PollResult(void) {
         const self: *Self = @ptrCast(ptr);
         return self.poll(ctx);
     }
 
-    fn task(self: *Self) csio.task.Task {
+    fn task(self: *Self) csio.Task {
         return .{
             .ptr = self,
             .poll_fn = Self.poll_fn,
@@ -115,7 +115,7 @@ const SetupFile = struct {
         };
     }
 
-    fn poll(self: *Self, ctx: task.Context) task.PollResult(linux.fd_t) {
+    fn poll(self: *Self, ctx: csio.Context) csio.PollResult(linux.fd_t) {
         while (true) {
             switch (self.state) {
                 .start => {
@@ -132,8 +132,8 @@ const SetupFile = struct {
                             res catch unreachable;
 
                             const now = Instant.now() catch unreachable;
-                            
-                            std.log.info("It took {}us to remove old file", .{ now.since(s.start_t) / 1000 });
+
+                            std.log.info("It took {}us to remove old file", .{now.since(s.start_t) / 1000});
 
                             self.state = .{
                                 .open = .{
@@ -160,10 +160,14 @@ const SetupFile = struct {
 
                             const now = Instant.now() catch unreachable;
 
-                            std.log.info("It took {}us to create new file", .{ now.since(s.start_t) / 1000 });
+                            std.log.info("It took {}us to create new file", .{now.since(s.start_t) / 1000});
 
                             self.state = .{
-                                .fallocate = .{ .fd = fd, .io = fs.FAllocate.init(fd, 0, 0, self.size), .start_t = now, },
+                                .fallocate = .{
+                                    .fd = fd,
+                                    .io = fs.FAllocate.init(fd, 0, 0, self.size),
+                                    .start_t = now,
+                                },
                             };
                         },
                         .pending => return .pending,
@@ -188,4 +192,3 @@ const SetupFile = struct {
         }
     }
 };
-
