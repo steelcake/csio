@@ -139,8 +139,8 @@ pub const Executor = struct {
                         .preempt_duration_ns = self.preempt_duration_ns,
                         .io = &self.io,
                         .start_t = start,
-                        .io_queue = &self.io_ring.io_queue,
-                        .polled_io_queue = &self.polled_io_ring.io_queue,
+                        .ring = &self.io_ring,
+                        .polled_ring = &self.polled_io_ring,
                         .task_entry = entry,
                         .io_alloc = &self.io_alloc,
                     });
@@ -238,7 +238,7 @@ pub const IoUring = struct {
         }
     }
 
-    pub fn handle_cqe(entry: *TaskEntry, cqe: linux.io_uring_cqe) void {
+    fn handle_cqe(entry: *TaskEntry, cqe: linux.io_uring_cqe) void {
         std.debug.assert(entry.num_finished_io < MAX_IO_PER_TASK);
         entry.finished_io[entry.num_finished_io] = cqe;
         entry.num_finished_io += 1;
@@ -272,7 +272,7 @@ pub const IoUring = struct {
         self.pending_io -= ready;
     }
 
-    pub fn push(self: *Self, sqe: linux.io_uring_sqe) void {
+    pub fn queue_io(self: *Self, sqe: linux.io_uring_sqe) void {
         while (true) {
             switch (self.ring.get_sqe()) {
                 .ok => |sqe_ptr| {

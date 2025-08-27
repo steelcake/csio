@@ -42,9 +42,9 @@ pub const Context = struct {
         sqe.user_data = io_id;
 
         if (polled) {
-            self.polled_ring.push(sqe);
+            self.polled_ring.queue_io(sqe);
         } else {
-            self.ring.push(sqe);
+            self.ring.queue_io(sqe);
         }
 
         return io_id;

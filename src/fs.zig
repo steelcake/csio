@@ -375,27 +375,28 @@ pub const DioBuf = struct {
     }
 };
 
-pub fn mkdir(path: [:0]const u8, mode: linux.mode_t) Mkdir {
-    return .{ .path = path, .mode = mode };
-}
-
 pub const Mkdir = struct {
     path: [:0]const u8,
     mode: linux.mode_t,
 
     io_id: ?u64,
+    finished: bool,
 
     pub fn init(path: [:0]const u8, mode: linux.mode_t) Mkdir {
         return .{
             .path = path,
             .mode = mode,
             .io_id = null,
+            .finished = false,
         };
     }
 
     pub fn poll(self: *Mkdir, ctx: Context) PollResult(linux.E!void) {
+        std.debug.assert(!self.finished);
+
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
+                self.finished = true;
                 switch (cqe.err()) {
                     .SUCCESS => {
                         std.debug.assert(cqe.res == 0);
@@ -448,18 +449,23 @@ pub const UnlinkAt = struct {
     flags: u32,
 
     io_id: ?u64,
+    finished: bool,
 
     pub fn init(path: [:0]const u8, flags: u32) UnlinkAt {
         return .{
             .path = path,
             .flags = flags,
             .io_id = null,
+            .finished = false,
         };
     }
 
     pub fn poll(self: *UnlinkAt, ctx: Context) PollResult(linux.E!void) {
+        std.debug.assert(!self.finished);
+
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
+                self.finished = true;
                 switch (cqe.err()) {
                     .SUCCESS => {
                         std.debug.assert(cqe.res == 0);
@@ -485,6 +491,7 @@ pub const Write = struct {
     buf: []const u8,
 
     io_id: ?u64,
+    finished: bool,
 
     pub fn init(fd: linux.fd_t, buf: []const u8, offset: u64) Write {
         return .{
@@ -492,12 +499,16 @@ pub const Write = struct {
             .buf = buf,
             .offset = offset,
             .io_id = null,
+            .finished = false,
         };
     }
 
     pub fn poll(self: *Write, ctx: Context) PollResult(linux.E!usize) {
+        std.debug.assert(!self.finished);
+
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
+                self.finished = true;
                 switch (cqe.err()) {
                     .SUCCESS => return @intCast(cqe.res),
                     else => |e| return .{ .ready = e },
@@ -520,6 +531,7 @@ pub const Read = struct {
     buf: []u8,
 
     io_id: ?u64,
+    finished: bool,
 
     pub fn init(fd: linux.fd_t, buf: []u8, offset: u64) Read {
         return .{
@@ -527,12 +539,16 @@ pub const Read = struct {
             .buf = buf,
             .offset = offset,
             .io_id = null,
+            .finished = false,
         };
     }
 
     pub fn poll(self: *Read, ctx: Context) PollResult(linux.E!usize) {
+        std.debug.assert(!self.finished);
+
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
+                self.finished = true;
                 switch (cqe.err()) {
                     .SUCCESS => return @intCast(cqe.res),
                     else => |e| return .{ .ready = e },
@@ -555,6 +571,7 @@ pub const Open = struct {
     mode: linux.mode_t,
 
     io_id: ?u64,
+    finished: bool,
 
     pub fn init(path: [:0]const u8, flags: i32, mode: linux.mode_t) Open {
         return .{
@@ -562,12 +579,17 @@ pub const Open = struct {
             .flags = flags,
             .mode = mode,
             .io_id = null,
+            .finished = false,
         };
     }
 
     pub fn poll(self: *Open, ctx: Context) PollResult(linux.E!linux.fd_t) {
+        std.debug.assert(!self.finished);
+
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
+                self.finished = true;
+
                 switch (cqe.err()) {
                     .SUCCESS => return @intCast(cqe.res),
                     else => |e| return .{ .ready = e },
@@ -588,14 +610,18 @@ pub const Close = struct {
     fd: linux.fd_t,
 
     io_id: ?u64,
+    finished: bool,
 
     pub fn init(fd: linux.fd_t) Close {
-        return .{ .fd = fd };
+        return .{ .fd = fd, .io_id = null, .finished = false };
     }
 
     pub fn poll(self: *Close, ctx: Context) PollResult(linux.E!void) {
+        std.debug.assert(!self.finished);
+
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
+                self.finished = true;
                 switch (cqe.err()) {
                     .SUCCESS => return,
                     else => |e| return .{ .ready = e },
@@ -619,6 +645,7 @@ pub const FAllocate = struct {
     size: u64,
 
     io_id: ?u64,
+    finished: bool,
 
     pub fn init(fd: linux.fd_t, mode: i32, offset: u64, size: u64) FAllocate {
         return .{
@@ -627,12 +654,16 @@ pub const FAllocate = struct {
             .offset = offset,
             .size = size,
             .io_id = null,
+            .finished = false,
         };
     }
 
     pub fn poll(self: *FAllocate, ctx: Context) PollResult(linux.E!void) {
+        std.debug.assert(!self.finished);
+
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
+                self.finished = true;
                 switch (cqe.err()) {
                     .SUCCESS => {
                         std.debug.assert(cqe.res == 0);
