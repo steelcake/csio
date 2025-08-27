@@ -179,9 +179,6 @@ const IoUring = struct {
     // Queued to be pushed to the sq
     io_queue: Queue(linux.io_uring_sqe),
 
-    // Keep submission time of IO so we can check if any IO is taking too much time.
-    io_submit_time: SliceMap(u64, Instant),
-
     pending_io: u16,
 
     fn init(params: struct {
@@ -217,12 +214,10 @@ const IoUring = struct {
 
         // Use a larger sizes so we don't run out of capacity easily.
         const io_queue = try Queue(linux.io_uring_sqe).init(params.max_io, params.alloc);
-        const io_submit_time = try SliceMap(u64, Instant).init(params.max_io, params.alloc);
 
         return Self{
             .ring = ring,
             .io_queue = io_queue,
-            .io_submit_time = io_submit_time,
             .pending_io = 0,
         };
     }
@@ -233,7 +228,6 @@ const IoUring = struct {
 
         self.ring.deinit();
         self.io_queue.deinit(alloc);
-        self.io_submit_time.deinit(alloc);
     }
 
     fn maybe_warn_io_time(now: Instant, start: Instant) void {
@@ -255,14 +249,9 @@ const IoUring = struct {
         const ready = self.ring.cq_ready();
         const head = self.ring.cq.head.* & self.ring.cq.mask;
 
-        const now = Instant.now() catch unreachable;
-
         // before wrapping
         const n = self.ring.cq.cqes.len - head;
         for (self.ring.cq.cqes[head .. head + @min(n, ready)]) |cqe| {
-            const start = self.io_submit_time.remove(cqe.user_data) orelse unreachable;
-            maybe_warn_io_time(now, start);
-
             const task_id = io.get(cqe.user_data) orelse unreachable;
             const entry = tasks.get_mut_ref(task_id) orelse unreachable;
             handle_cqe(entry, cqe);
@@ -272,18 +261,11 @@ const IoUring = struct {
         // wrap self.cq.cqes
         if (ready > n) {
             for (self.ring.cq.cqes[0 .. ready - n]) |cqe| {
-                const start = self.io_submit_time.remove(cqe.user_data) orelse unreachable;
-                maybe_warn_io_time(now, start);
-
                 const task_id = io.get(cqe.user_data) orelse unreachable;
                 const entry = tasks.get_mut_ref(task_id) orelse unreachable;
                 handle_cqe(entry, cqe);
                 _ = to_notify.insert(task_id, {}) catch unreachable;
             }
-        }
-
-        for (0..self.io_submit_time.values[0..self.io_submit_time.len]) |start| {
-            maybe_warn_io_time(now, start);
         }
 
         self.ring.cq_advance(ready);
@@ -296,7 +278,6 @@ const IoUring = struct {
                 .ok => |sqe_ptr| {
                     self.pending_io += 1;
                     const sqe = self.io_queue.pop() orelse unreachable;
-                    self.io_submit_time(sqe.user_data, Instant.now() catch unreachable) catch unreachable;
                     sqe_ptr.* = sqe;
                 },
                 .err => return,

@@ -6,59 +6,19 @@ const Context = task_mod.Context;
 const PollResult = task_mod.PollResult;
 const IoAlloc = @import("io_alloc.zig").IoAlloc;
 
-pub const DioFile = struct {
-    fd: linux.fd_t,
-
-    pub fn open(path: [:0]const u8, flags: i32, mode: linux.mode_t) Open {
-        return .{
-            .path = path,
-            .flags = flags,
-            .mode = mode,
-            .io_id = null,
-        };
-    }
-
-    pub fn close(self: DioFile) Close {
-        return .{
-            .fd = self.fd,
-            .io_id = null,
-        };
-    }
-
-    pub fn fallocate(self: *const DioFile, mode: i32, offset: u64, size: u64) FAllocate {
-        return .{
-            .fd = self.fd,
-            .mode = mode,
-            .offset = offset,
-            .size = size,
-        };
-    }
-
-    pub fn read(self: *const DioFile, offset: u64, size: u32) DioRead {
-        return DioRead.init(self.fd, offset, size);
-    }
-
-    /// This function doesn't take ownership of `buf`. The caller still has to call `.release()` on it.
-    ///
-    /// This operation doesn't take ownership of the buffer. It should be `.free`d by the caller sometime after the write operation finishes.
-    pub fn write(self: *const DioFile, buf: *const DioBuf, offset: u64) DioWrite {
-        return DioWrite.init(self.fd, buf.*, offset);
-    }
-
-    /// Allocate a buffer suitable for doing direct_io
-    ///
-    /// Intended to be used for `DioFile.write`
-    ///
-    /// Caller should release the memory by calling `DioBuf.free` after their use is done.
-    pub fn alloc_dio_buffer(ctx: Context, size: u32) DioBuf {
-        return DioBuf{
-            .alloc_buf = ctx.io_alloc.alloc(size) catch unreachable,
-            .alloc = ctx.io_alloc,
-            .data_start = 0,
-            .data_end = size,
-        };
-    }
-};
+/// Allocate a buffer suitable for doing direct_io
+///
+/// Intended to be used for `DioFile.write`
+///
+/// Caller should release the memory by calling `DioBuf.free` after their use is done.
+pub fn alloc_dio_buffer(ctx: Context, size: u32) DioBuf {
+    return DioBuf{
+        .alloc_buf = ctx.io_alloc.alloc(size) catch unreachable,
+        .alloc = ctx.io_alloc,
+        .data_start = 0,
+        .data_end = size,
+    };
+}
 
 pub fn align_forward(addr: usize, alignment: usize) usize {
     return (addr +% alignment -% 1) & ~(alignment -% 1);
@@ -68,11 +28,9 @@ pub fn align_backward(addr: usize, alignment: usize) usize {
     return addr & ~(alignment - 1);
 }
 
-const MAX_DIO_SIZE = 1 << 19; // 512KB
-const DIO_CONCURRENCY = 4; // per single read/write call
-
 pub const DioWrite = union(enum) {
-    const CONCURRENCY = DIO_CONCURRENCY;
+    pub const CONCURRENCY = 4;
+    pub const MAX_IO_SIZE = 1 << 19;
 
     const Self = @This();
 
@@ -100,7 +58,7 @@ pub const DioWrite = union(enum) {
     },
     finished: void,
 
-    fn init(fd: linux.fd_t, buf: DioBuf, offset: u64) Self {
+    pub fn init(fd: linux.fd_t, buf: DioBuf, offset: u64) Self {
         std.debug.assert(buf.data_start % IoAlloc.ALIGN == 0);
         std.debug.assert(buf.data_end % IoAlloc.ALIGN == 0);
 
@@ -182,7 +140,7 @@ pub const DioWrite = union(enum) {
 
                             const io_offset: u64 = s.file_offset + s.offset;
 
-                            const io_size = @min(MAX_DIO_SIZE, s.io_buf.size() - s.offset);
+                            const io_size = @min(MAX_IO_SIZE, s.io_buf.size() - s.offset);
                             s.offset += io_size;
 
                             // Doesn't have to be mutable but stdlib API for prep_write_fixed is wrong
@@ -228,7 +186,8 @@ pub const DioWrite = union(enum) {
 };
 
 pub const DioRead = union(enum) {
-    const CONCURRENCY = DIO_CONCURRENCY;
+    const CONCURRENCY = 4;
+    const MAX_IO_SIZE = 1 << 19;
 
     const Self = @This();
 
@@ -255,7 +214,7 @@ pub const DioRead = union(enum) {
     },
     finished: void,
 
-    fn init(fd: linux.fd_t, offset: u64, size: u32) Self {
+    pub fn init(fd: linux.fd_t, offset: u64, size: u32) Self {
         return Self{
             .start = .{
                 .fd = fd,
@@ -349,7 +308,7 @@ pub const DioRead = union(enum) {
                             const io_buf_ptr: [*]u8 = @ptrFromInt(@intFromPtr(s.io_buf.alloc_buf.ptr) + s.io_buf.alloc_buf.len - self.size);
 
                             const io_offset = s.offset;
-                            const io_size = @min(MAX_DIO_SIZE, s.size);
+                            const io_size = @min(MAX_IO_SIZE, s.size);
                             s.offset += io_size;
                             s.size -= io_size;
 
@@ -416,61 +375,6 @@ pub const DioBuf = struct {
     }
 };
 
-pub const File = struct {
-    fd: linux.fd_t,
-
-    pub fn open(path: [:0]const u8, flags: i32, mode: linux.mode_t) Open {
-        return .{
-            .path = path,
-            .flags = flags,
-            .mode = mode,
-            .io_id = null,
-        };
-    }
-
-    pub fn close(self: File) Close {
-        return .{
-            .fd = self.fd,
-            .io_id = null,
-        };
-    }
-
-    pub fn read(self: *const File, buf: []u8, offset: u64) Read {
-        return .{
-            .fd = self.fd,
-            .offset = offset,
-            .buf = buf,
-            .retried = false,
-        };
-    }
-
-    pub fn write(self: *const File, buf: []const u8, offset: u64) Write {
-        return .{
-            .fd = self.fd,
-            .offset = offset,
-            .buf = buf,
-            .retried = false,
-        };
-    }
-
-    pub fn fallocate(self: *const File, mode: i32, offset: u64, size: u64) FAllocate {
-        return .{
-            .fd = self.fd,
-            .mode = mode,
-            .offset = offset,
-            .size = size,
-        };
-    }
-};
-
-pub fn unlink(path: [:0]const u8) UnlinkAt {
-    return .{ .path = path, .flags = 0 };
-}
-
-pub fn rmdir(path: [:0]const u8) UnlinkAt {
-    return .{ .path = path, .flags = linux.AT.REMOVEDIR };
-}
-
 pub fn mkdir(path: [:0]const u8, mode: linux.mode_t) Mkdir {
     return .{ .path = path, .mode = mode };
 }
@@ -480,6 +384,14 @@ pub const Mkdir = struct {
     mode: linux.mode_t,
 
     io_id: ?u64,
+
+    pub fn init(path: [:0]const u8, mode: linux.mode_t) Mkdir {
+        return .{
+            .path = path,
+            .mode = mode,
+            .io_id = null,
+        };
+    }
 
     pub fn poll(self: *Mkdir, ctx: Context) PollResult(linux.E!void) {
         if (self.io_id) |io_id| {
@@ -503,11 +415,47 @@ pub const Mkdir = struct {
     }
 };
 
+pub const RemoveFile = struct {
+    inner: UnlinkAt,
+
+    pub fn init(path: [:0]const u8) RemoveFile {
+        return .{
+            .inner = UnlinkAt.init(path, 0),
+        };
+    }
+
+    pub fn poll(self: *RemoveFile, ctx: Context) PollResult(linux.E!void) {
+        return self.inner.poll(ctx);
+    }
+};
+
+pub const RemoveDir = struct {
+    inner: UnlinkAt,
+
+    pub fn init(path: [:0]const u8) RemoveDir {
+        return .{
+            .inner = UnlinkAt.init(path, linux.AT.REMOVEDIR),
+        };
+    }
+
+    pub fn poll(self: *RemoveDir, ctx: Context) PollResult(linux.E!void) {
+        return self.inner.poll(ctx);
+    }
+};
+
 pub const UnlinkAt = struct {
     path: [:0]const u8,
     flags: u32,
 
     io_id: ?u64,
+
+    pub fn init(path: [:0]const u8, flags: u32) UnlinkAt {
+        return .{
+            .path = path,
+            .flags = flags,
+            .io_id = null,
+        };
+    }
 
     pub fn poll(self: *UnlinkAt, ctx: Context) PollResult(linux.E!void) {
         if (self.io_id) |io_id| {
@@ -538,6 +486,15 @@ pub const Write = struct {
 
     io_id: ?u64,
 
+    pub fn init(fd: linux.fd_t, buf: []const u8, offset: u64) Write {
+        return .{
+            .fd = fd,
+            .buf = buf,
+            .offset = offset,
+            .io_id = null,
+        };
+    }
+
     pub fn poll(self: *Write, ctx: Context) PollResult(linux.E!usize) {
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
@@ -563,6 +520,15 @@ pub const Read = struct {
     buf: []u8,
 
     io_id: ?u64,
+
+    pub fn init(fd: linux.fd_t, buf: []u8, offset: u64) Read {
+        return .{
+            .fd = fd,
+            .buf = buf,
+            .offset = offset,
+            .io_id = null,
+        };
+    }
 
     pub fn poll(self: *Read, ctx: Context) PollResult(linux.E!usize) {
         if (self.io_id) |io_id| {
@@ -590,11 +556,20 @@ pub const Open = struct {
 
     io_id: ?u64,
 
-    pub fn poll(self: *Open, ctx: Context) PollResult(linux.E!File) {
+    pub fn init(path: [:0]const u8, flags: i32, mode: linux.mode_t) Open {
+        return .{
+            .path = path,
+            .flags = flags,
+            .mode = mode,
+            .io_id = null,
+        };
+    }
+
+    pub fn poll(self: *Open, ctx: Context) PollResult(linux.E!linux.fd_t) {
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
                 switch (cqe.err()) {
-                    .SUCCESS => return File{ .fd = cqe.res },
+                    .SUCCESS => return @intCast(cqe.res),
                     else => |e| return .{ .ready = e },
                 }
             } else {
@@ -613,6 +588,10 @@ pub const Close = struct {
     fd: linux.fd_t,
 
     io_id: ?u64,
+
+    pub fn init(fd: linux.fd_t) Close {
+        return .{ .fd = fd };
+    }
 
     pub fn poll(self: *Close, ctx: Context) PollResult(linux.E!void) {
         if (self.io_id) |io_id| {
@@ -640,6 +619,16 @@ pub const FAllocate = struct {
     size: u64,
 
     io_id: ?u64,
+
+    pub fn init(fd: linux.fd_t, mode: i32, offset: u64, size: u64) FAllocate {
+        return .{
+            .fd = fd,
+            .mode = mode,
+            .offset = offset,
+            .size = size,
+            .io_id = null,
+        };
+    }
 
     pub fn poll(self: *FAllocate, ctx: Context) PollResult(linux.E!void) {
         if (self.io_id) |io_id| {

@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const Instant = std.time.Instant;
 
 const csio = @import("csio");
+const fs = csio.fs;
 
 pub fn main() !void {
     const mem = std.heap.page_allocator.alloc(1 << 30);
@@ -29,13 +30,22 @@ const MainTask = union(enum) {
     const FILE_PATH = "testfile";
     const IO_SIZE = 1 << 22;
 
-    init: void,
-    delete: struct { start_t: Instant, io: csio.file.UnlinkAt },
-    create: struct { start_t: Instant, io: csio.file.Open },
+    start: struct { alloc: Allocator },
+    delete: struct {
+        start_t: Instant,
+        io: fs.RemoveFile,
+        alloc: Allocator,
+    },
+    create: struct {
+        start_t: Instant,
+        io: fs.Open,
+        alloc: Allocator,
+    },
     fallocate: struct {
         start_t: Instant,
         file: csio.file.DioFile,
         io: csio.file.FAllocate,
+        alloc: Allocator,
     },
     write: struct {
         start_t: Instant,
@@ -44,6 +54,7 @@ const MainTask = union(enum) {
         io_buf: [CONCURRENCY]csio.file.DioBuf,
         io_is_running: [CONCURRENCY]bool,
         current_offset: u64,
+        alloc: Allocator,
     },
     read: struct {
         start_t: Instant,
@@ -53,8 +64,17 @@ const MainTask = union(enum) {
         io_offset: [CONCURRENCY]u64,
         io_size: [CONCURRENCY]u32,
         io_is_running: [CONCURRENCY]bool,
+        alloc: Allocator,
     },
-    close: struct { start_t: Instant, io: csio.file.Close },
+    close: struct {
+        start_t: Instant,
+        io: csio.file.Close,
+        alloc: Allocator,
+    },
+
+    fn init(alloc: Allocator) Self {
+        return .{ .start = .{ .alloc = Allocator } };
+    }
 
     fn poll(self: *Self, ctx: csio.task.Context) csio.task.PollResult(!void) {
         while (true) {
