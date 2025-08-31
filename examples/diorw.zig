@@ -7,19 +7,19 @@ const csio = @import("csio");
 const fs = csio.fs;
 
 pub fn main() !void {
-    const mem = std.heap.page_allocator.alloc(1 << 30);
+    const mem = try std.heap.page_allocator.alloc(u8, 1 << 30);
     defer std.heap.page_allocator.free(mem);
 
     var fb_alloc = std.heap.FixedBufferAllocator.init(mem);
     const alloc = fb_alloc.allocator();
 
-    var exec = try csio.executor.Executor.init(.{
+    var exec = try csio.Executor.init(.{
         .wq_fd = null,
         .alloc = alloc,
     });
     defer exec.deinit(alloc);
 
-    const main_task = MainTask.init();
+    var main_task = MainTask.init("testfile", 1 << 34);
     exec.run(main_task.task());
 }
 
@@ -33,51 +33,52 @@ const MainTask = struct {
         finished,
     };
 
-    alloc: Allocator,
     path: [:0]const u8,
     size: u64,
     state: State,
 
-    fn init(path: [:0]const u8, size: u64, alloc: Allocator) Self {
+    fn init(path: [:0]const u8, size: u64) Self {
         return .{
             .state = .start,
-            .alloc = alloc,
             .path = path,
             .size = size,
         };
     }
 
-    fn poll(self: *Self, ctx: csio.Context) csio.PollResult(void) {
+    fn poll(self: *Self, ctx: *const csio.Context) csio.PollResult(void) {
         while (true) {
-            switch (self.*) {
-                .init => {
-                    self.* = .{ .delete = .{
-                        .start_t = Instant.now(),
-                        .io = csio.file.unlink(FILE_PATH),
-                    } };
+            switch (self.state) {
+                .start => {
+                    self.state = .{
+                        .setup_file = SetupFile.init(self.path, self.size),
+                    };
                 },
-                .delete => |*s| {
-                    switch (s.io.poll(ctx)) {
-                        .ready => |res| {
-                            std.log.info("it took {}us to run delete", .{Instant.now().since(s.start_t) / 1000});
-                            res catch |e| {
-                                std.log.err("failed to delete file: {any}", e);
-                            };
-                            self.* = .{
-                                .create = .{
-                                    .io = csio.file.DioFile.open(),
-                                },
+                .setup_file => |*sf| {
+                    switch (sf.poll(ctx)) {
+                        .ready => |fd| {
+                            self.state = .{
+                                .close_file = fs.Close.init(fd),
                             };
                         },
                         .pending => return .pending,
                     }
                 },
+                .close_file => |*cf| {
+                    switch (cf.poll(ctx)) {
+                        .ready => {
+                            self.state = .{ .finished = {} };
+                            return .ready;
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .finished => unreachable,
             }
         }
     }
 
-    fn poll_fn(ptr: *anyopaque, ctx: csio.Context) csio.PollResult(void) {
-        const self: *Self = @ptrCast(ptr);
+    fn poll_fn(ptr: *anyopaque, ctx: *const csio.Context) csio.PollResult(void) {
+        const self: *Self = @ptrCast(@alignCast(ptr));
         return self.poll(ctx);
     }
 
@@ -115,7 +116,7 @@ const SetupFile = struct {
         };
     }
 
-    fn poll(self: *Self, ctx: csio.Context) csio.PollResult(linux.fd_t) {
+    fn poll(self: *Self, ctx: *const csio.Context) csio.PollResult(linux.fd_t) {
         while (true) {
             switch (self.state) {
                 .start => {

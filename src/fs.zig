@@ -391,7 +391,7 @@ pub const Mkdir = struct {
         };
     }
 
-    pub fn poll(self: *Mkdir, ctx: Context) PollResult(linux.E!void) {
+    pub fn poll(self: *Mkdir, ctx: Context) PollResult(!void) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -425,7 +425,7 @@ pub const RemoveFile = struct {
         };
     }
 
-    pub fn poll(self: *RemoveFile, ctx: Context) PollResult(linux.E!void) {
+    pub fn poll(self: *RemoveFile, ctx: Context) PollResult(!void) {
         return self.inner.poll(ctx);
     }
 };
@@ -439,7 +439,7 @@ pub const RemoveDir = struct {
         };
     }
 
-    pub fn poll(self: *RemoveDir, ctx: Context) PollResult(linux.E!void) {
+    pub fn poll(self: *RemoveDir, ctx: Context) PollResult(!void) {
         return self.inner.poll(ctx);
     }
 };
@@ -460,7 +460,7 @@ pub const UnlinkAt = struct {
         };
     }
 
-    pub fn poll(self: *UnlinkAt, ctx: Context) PollResult(linux.E!void) {
+    pub fn poll(self: *UnlinkAt, ctx: Context) PollResult(!void) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -503,7 +503,7 @@ pub const Write = struct {
         };
     }
 
-    pub fn poll(self: *Write, ctx: Context) PollResult(linux.E!usize) {
+    pub fn poll(self: *Write, ctx: Context) PollResult(!usize) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -543,7 +543,7 @@ pub const Read = struct {
         };
     }
 
-    pub fn poll(self: *Read, ctx: Context) PollResult(linux.E!usize) {
+    pub fn poll(self: *Read, ctx: Context) PollResult(!usize) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -583,7 +583,7 @@ pub const Open = struct {
         };
     }
 
-    pub fn poll(self: *Open, ctx: Context) PollResult(linux.E!linux.fd_t) {
+    pub fn poll(self: *Open, ctx: Context) PollResult(!linux.fd_t) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -616,7 +616,7 @@ pub const Close = struct {
         return .{ .fd = fd, .io_id = null, .finished = false };
     }
 
-    pub fn poll(self: *Close, ctx: Context) PollResult(linux.E!void) {
+    pub fn poll(self: *Close, ctx: Context) PollResult(!void) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -658,7 +658,7 @@ pub const FAllocate = struct {
         };
     }
 
-    pub fn poll(self: *FAllocate, ctx: Context) PollResult(linux.E!void) {
+    pub fn poll(self: *FAllocate, ctx: Context) PollResult(!void) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {

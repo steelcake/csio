@@ -4,7 +4,6 @@ const linux = std.os.linux;
 
 const slab_mod = @import("./slab.zig");
 const Slab = slab_mod.Slab;
-const SlabKey = slab_mod.Key;
 const IoAlloc = @import("./io_alloc.zig").IoAlloc;
 const SliceMap = @import("./slice_map.zig").SliceMap;
 const Queue = @import("./queue.zig").Queue;
@@ -21,12 +20,17 @@ pub const TaskEntry = struct {
 
 pub const Context = struct {
     start_t: Instant,
-    task_id: u32,
+    task_id: u64,
     task_entry: *TaskEntry,
     ring: *IoUring,
     polled_ring: *IoUring,
-    io: *Slab(SlabKey),
-    to_notify: *SliceMap(SlabKey, void),
+
+    // io_id -> task_id
+    io: *Slab(u64),
+
+    // task_id -> void
+    to_notify: *SliceMap(u64, void),
+
     preempt_duration_ns: u64,
     io_alloc: *IoAlloc,
 
@@ -72,9 +76,9 @@ pub fn PollResult(comptime T: type) type {
 
 pub const Task = struct {
     ptr: *anyopaque,
-    poll_fn: *const fn (*anyopaque, ctx: *Context) PollResult(void),
+    poll_fn: *const fn (*anyopaque, ctx: *const Context) PollResult(void),
 
-    pub fn poll(self: Task, ctx: *Context) PollResult(void) {
+    pub fn poll(self: Task, ctx: *const Context) PollResult(void) {
         return self.poll_fn(self.ptr, ctx);
     }
 };

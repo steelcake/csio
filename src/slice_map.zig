@@ -25,13 +25,15 @@ pub fn SliceMap(comptime K: type, comptime V: type) type {
             alloc.free(self.values);
         }
 
-        pub fn swap_remove(self: *Self, index: u32) V {
-            std.debug.assert(index < self.len);
+        pub fn swap_remove(self: *Self, index: u32) ?struct { key: K, value: V } {
+            if (index >= self.len) {
+                return null;
+            }
 
             // useless but for clarity
             std.debug.assert(self.len > 0);
 
-            const out = self.values[index];
+            const out = .{ .value = self.values[index], .key = self.keys[index] };
 
             const end = self.len - 1;
             self.keys[index] = self.keys[end];

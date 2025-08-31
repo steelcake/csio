@@ -57,7 +57,7 @@ pub const Executor = struct {
 
         const wq_fd = if (params.wq_fd) |w| w else io_ring.ring.fd;
 
-        const polled_io_ring = try IoUring.init(.{
+        var polled_io_ring = try IoUring.init(.{
             .entries = params.entries,
             .max_io = max_io,
             .wq_fd = wq_fd,
@@ -75,7 +75,7 @@ pub const Executor = struct {
         };
 
         const io = try Slab(u64).init(max_io, params.alloc);
-        const tasks = try Slab(Task).init(params.max_num_tasks, params.alloc);
+        const tasks = try Slab(TaskEntry).init(params.max_num_tasks, params.alloc);
         const to_notify = try SliceMap(u64, void).init(params.max_num_tasks, params.alloc);
 
         return Self{
@@ -113,8 +113,7 @@ pub const Executor = struct {
             .finished_io = undefined,
             .num_finished_io = 0,
             .num_pending_io = 0,
-            .finished_execution = false,
-        }) orelse unreachable;
+        }) catch unreachable;
         _ = self.to_notify.insert(main_task_id, {}) catch unreachable;
 
         while (!self.tasks.is_empty()) {
@@ -129,13 +128,14 @@ pub const Executor = struct {
             }
 
             // Run tasks
-            while (self.to_notify.swap_remove(0)) |task_id| {
+            while (self.to_notify.swap_remove(0)) |task_id_entry| {
+                const task_id = task_id_entry.key;
                 // it is illegal to notify finished tasks
                 const entry = self.tasks.get_mut_ref(task_id) orelse unreachable;
 
                 const start = Instant.now() catch unreachable;
 
-                const poll_res = entry.task.poll(Context{
+                const poll_res = entry.task.poll(&Context{
                     .task_id = task_id,
                     .to_notify = &self.to_notify,
                     .preempt_duration_ns = self.preempt_duration_ns,
@@ -164,6 +164,10 @@ pub const Executor = struct {
                 self.drive_io();
             }
         }
+
+        std.debug.assert(self.tasks.is_empty());
+        std.debug.assert(self.to_notify.is_empty());
+        std.debug.assert(self.io.is_empty());
     }
 
     fn drive_io(self: *Self) void {
@@ -205,11 +209,11 @@ pub const IoUring = struct {
         }
 
         var ring_params = std.mem.zeroInit(linux.io_uring_params, .{
-            .wq_fd = if (params.wq_fd) |fd| @intCast(fd) else 0,
+            .wq_fd = if (params.wq_fd) |fd| @as(u32, @intCast(fd)) else 0,
             .sq_thread_idle = 1000,
             .flags = flags,
         });
-        const ring = linux.IoUring.init_params(std.math.ceilPowerOfTwo(u16, params.entries), &ring_params) catch {
+        const ring = linux.IoUring.init_params(std.math.ceilPowerOfTwo(u16, params.entries) catch unreachable, &ring_params) catch {
             return error.IoUringSetupFail;
         };
 
@@ -223,7 +227,7 @@ pub const IoUring = struct {
         };
     }
 
-    fn deinit(self: Self, alloc: Allocator) void {
+    fn deinit(self: *Self, alloc: Allocator) void {
         std.debug.assert(self.pending_io == 0);
         std.debug.assert(self.io_queue.is_empty());
 
@@ -262,48 +266,40 @@ pub const IoUring = struct {
         }
 
         self.ring.cq_advance(ready);
-        self.pending_io -= ready;
+        self.pending_io -= @intCast(ready);
     }
 
     pub fn queue_io(self: *Self, sqe: linux.io_uring_sqe) void {
         while (true) {
-            switch (self.ring.get_sqe()) {
-                .ok => |sqe_ptr| {
-                    if (self.io_queue.pop()) |queued_sqe| {
-                        sqe_ptr.* = queued_sqe;
-                    } else {
-                        sqe_ptr.* = sqe;
-                        return;
-                    }
-                },
-                .err => {
-                    self.io_queue.push(sqe) catch unreachable;
-                    return;
-                },
+            const sqe_ptr = self.ring.get_sqe() catch {
+                self.io_queue.push(sqe) catch unreachable;
+                return;
+            };
+            if (self.io_queue.pop()) |queued_sqe| {
+                sqe_ptr.* = queued_sqe;
+            } else {
+                sqe_ptr.* = sqe;
+                return;
             }
         }
     }
 
     fn sync_sq(self: *Self) void {
         while (self.io_queue.len > 0) {
-            switch (self.ring.get_sqe()) {
-                .ok => |sqe_ptr| {
-                    self.pending_io += 1;
-                    const sqe = self.io_queue.pop() orelse unreachable;
-                    sqe_ptr.* = sqe;
-                },
-                .err => return,
-            }
+            const sqe_ptr = self.ring.get_sqe() catch return;
+            self.pending_io += 1;
+            const sqe = self.io_queue.pop() orelse unreachable;
+            sqe_ptr.* = sqe;
         }
     }
 
     fn maybe_wakeup(self: *Self) void {
-        var flags = 0;
+        var flags: u32 = 0;
         if (self.ring.sq_ring_needs_enter(&flags)) {
             while (true) {
-                self.ring.enter(0, 0, flags) catch |e| {
+                _ = self.ring.enter(0, 0, flags) catch |e| {
                     switch (e) {
-                        .EINT => continue,
+                        error.SignalInterrupt => continue,
                         else => {
                             std.debug.panic("failed to wakeup sqpoll thread: {}", e);
                         },
