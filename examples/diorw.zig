@@ -82,22 +82,20 @@ const MainTask = struct {
                 .close_file => |*cf| {
                     switch (cf.poll(ctx)) {
                         .ready => {
-                            self.state = .finished;
-                            return .ready;
-                            // self.state = .{ .delete_file = fs.RemoveFile.init(self.path) };
+                            self.state = .{ .delete_file = fs.RemoveFile.init(self.path) };
                         },
                         .pending => return .pending,
                     }
                 },
-                // .delete_file => |*df| {
-                //     switch (df.poll(ctx)) {
-                //         .ready => {
-                //             self.state = .finished;
-                //             return .ready;
-                //         },
-                //         .pending => return .pending,
-                //     }
-                // },
+                .delete_file => |*df| {
+                    switch (df.poll(ctx)) {
+                        .ready => {
+                            self.state = .finished;
+                            return .ready;
+                        },
+                        .pending => return .pending,
+                    }
+                },
                 .finished => unreachable,
             }
         }
@@ -119,8 +117,8 @@ const MainTask = struct {
 const Write = struct {
     const Self = @This();
 
-    const NUM_IO = 16;
-    const IO_SIZE = 1 << 24;
+    const NUM_IO = 10;
+    const IO_SIZE = 1 << 20;
 
     const State = union(enum) {
         start,
@@ -172,9 +170,7 @@ const Write = struct {
                 .running => |*s| {
                     var pending: u32 = 0;
                     io: for (0..NUM_IO) |idx| {
-                        std.log.warn("IDX: {}", .{idx});
                         if (ctx.yield_if_needed()) {
-                            std.log.warn("YIELD", .{});
                             return .pending;
                         }
                         const io_ptr = &s.io[idx];
@@ -204,22 +200,17 @@ const Write = struct {
                                 const buf_data = buf.data();
                                 std.debug.assert(buf_data.len == IO_SIZE);
 
-                                const sq = Instant.now() catch unreachable;
                                 var prng = Prng.init(s.offset + IO_SIZE * idx);
                                 const buf_out: []u64 = @ptrCast(@alignCast(buf_data));
                                 for (buf_out) |*x| {
                                     x.* = prng.next();
                                 }
-                                const now = Instant.now() catch unreachable;
-                                std.log.warn("SSS: {}", .{now.since(sq) / 1000});
 
                                 io_ptr.* = fs.DioWrite.init(self.fd, buf, s.offset);
                                 s.offset += IO_SIZE;
                             }
                         }
                     }
-
-                    std.log.warn("OFFSET == {}", .{s.offset});
 
                     if (s.offset == self.size and pending == 0) {
                         const now = Instant.now() catch unreachable;
