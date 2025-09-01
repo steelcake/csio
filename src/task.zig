@@ -34,6 +34,17 @@ pub const Context = struct {
     preempt_duration_ns: u64,
     io_alloc: *IoAlloc,
 
+    pub fn yield_if_needed(self: *const Context) bool {
+        const now = Instant.now() catch unreachable;
+
+        if (now.since(self.start_t) > self.preempt_duration_ns) {
+            _ = self.to_notify.insert(self.task_id, {}) catch unreachable;
+            return true;
+        } else {
+            return false;
+        }
+    }
+
     pub fn queue_io(self: *const Context, polled: bool, io: linux.io_uring_sqe) u64 {
         const entry = self.task_entry;
 

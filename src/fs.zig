@@ -9,16 +9,20 @@ const IoAlloc = @import("io_alloc.zig").IoAlloc;
 
 /// Allocate a buffer suitable for doing direct_io
 ///
-/// Intended to be used for `DioFile.write`
+/// Intended to be used for `DioWrite`
 ///
-/// Caller should release the memory by calling `DioBuf.free` after their use is done.
+/// Caller should release the memory by calling `free_dio_buffer` after their use is done.
 pub fn alloc_dio_buffer(ctx: *const Context, size: u32) DioBuf {
     return DioBuf{
         .alloc_buf = ctx.io_alloc.alloc(size) catch unreachable,
-        .alloc = ctx.io_alloc,
         .data_start = 0,
         .data_end = size,
     };
+}
+
+/// Should be used to free `DioBuf` allocated to be used with `DioWrite` or `DioBuf` returned from `DioRead`
+pub fn free_dio_buffer(ctx: *const Context, buf: DioBuf) void {
+    ctx.io_alloc.free(buf.alloc_buf);
 }
 
 pub fn align_forward(addr: usize, alignment: usize) usize {
@@ -52,7 +56,7 @@ pub const DioWrite = union(enum) {
         offset: u32,
         io_buf: DioBuf,
         io_id: [CONCURRENCY]u64,
-        io_size: [CONCURRENCY]u16,
+        io_size: [CONCURRENCY]u32,
         io_is_running: [CONCURRENCY]bool,
     },
     fail: struct {
@@ -144,7 +148,7 @@ pub const DioWrite = union(enum) {
 
                             const io_offset: u64 = s.file_offset + s.offset;
 
-                            const io_size = @min(MAX_IO_SIZE, s.io_buf.size() - s.offset);
+                            const io_size: u32 = @min(MAX_IO_SIZE, s.io_buf.size() - s.offset);
                             s.offset += io_size;
 
                             // Doesn't have to be mutable but stdlib API for prep_write_fixed is wrong
@@ -154,8 +158,8 @@ pub const DioWrite = union(enum) {
                             };
 
                             var sqe = std.mem.zeroes(linux.io_uring_sqe);
-                            sqe.prep_write_fixed(&sqe, s.fd, &iovec, io_offset, 0);
-                            s.io_id = ctx.queue_io(true, sqe);
+                            sqe.prep_write_fixed(s.fd, &iovec, io_offset, 0);
+                            s.io_id[io_idx] = ctx.queue_io(true, sqe);
                             s.io_size[io_idx] = io_size;
                             s.io_is_running[io_idx] = true;
                         }
@@ -365,15 +369,10 @@ pub const DioRead = union(enum) {
 
 pub const DioBuf = struct {
     alloc_buf: []align(IoAlloc.ALIGN) u8,
-    alloc: *IoAlloc,
 
     // Requested data
     data_start: u32,
     data_end: u32,
-
-    pub fn free(self: *const DioBuf) void {
-        self.alloc.free(self.alloc_buf);
-    }
 
     pub fn data(self: *const DioBuf) []u8 {
         return self.alloc_buf[self.data_start..self.data_end];

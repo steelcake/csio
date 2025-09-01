@@ -2,6 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const Instant = std.time.Instant;
+const Prng = std.Random.SplitMix64;
 
 const csio = @import("csio");
 const fs = csio.fs;
@@ -31,19 +32,21 @@ const MainTask = struct {
     const State = union(enum) {
         start,
         setup_file: SetupFile,
+        write: struct { io: Write, fd: linux.fd_t },
         close_file: fs.Close,
+        delete_file: fs.RemoveFile,
         finished,
     };
 
     path: [:0]const u8,
-    size: u64,
+    file_size: u64,
     state: State,
 
-    fn init(path: [:0]const u8, size: u64) Self {
+    fn init(path: [:0]const u8, file_size: u64) Self {
         return .{
             .state = .start,
             .path = path,
-            .size = size,
+            .file_size = file_size,
         };
     }
 
@@ -52,14 +55,24 @@ const MainTask = struct {
             switch (self.state) {
                 .start => {
                     self.state = .{
-                        .setup_file = SetupFile.init(self.path, self.size),
+                        .setup_file = SetupFile.init(self.path, self.file_size),
                     };
                 },
                 .setup_file => |*sf| {
                     switch (sf.poll(ctx)) {
                         .ready => |fd| {
                             self.state = .{
-                                .close_file = fs.Close.init(fd),
+                                .write = .{ .io = Write.init(fd, self.file_size), .fd = fd },
+                            };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .write => |*w| {
+                    switch (w.io.poll(ctx)) {
+                        .ready => {
+                            self.state = .{
+                                .close_file = fs.Close.init(w.fd),
                             };
                         },
                         .pending => return .pending,
@@ -68,7 +81,15 @@ const MainTask = struct {
                 .close_file => |*cf| {
                     switch (cf.poll(ctx)) {
                         .ready => {
-                            self.state = .{ .finished = {} };
+                            self.state = .{ .delete_file = fs.RemoveFile.init(self.path) };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .delete_file => |*df| {
+                    switch (df.poll(ctx)) {
+                        .ready => {
+                            self.state = .finished;
                             return .ready;
                         },
                         .pending => return .pending,
@@ -89,6 +110,111 @@ const MainTask = struct {
             .ptr = self,
             .poll_fn = Self.poll_fn,
         };
+    }
+};
+
+const Write = struct {
+    const Self = @This();
+
+    const NUM_IO = 4;
+    const IO_SIZE = 1 << 22;
+
+    const State = union(enum) {
+        start,
+        running: struct {
+            buffers: [NUM_IO]fs.DioBuf,
+            io: [NUM_IO]?fs.DioWrite,
+            offset: u64,
+            start_t: Instant,
+        },
+        finished,
+    };
+
+    fd: linux.fd_t,
+    size: u64,
+    state: State,
+
+    fn init(fd: linux.fd_t, size: u64) Write {
+        return .{
+            .fd = fd,
+            .size = size,
+            .state = .start,
+        };
+    }
+
+    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(void) {
+        while (true) {
+            switch (self.state) {
+                .start => {
+                    var buffers: [NUM_IO]fs.DioBuf = undefined;
+                    for (0..NUM_IO) |idx| {
+                        const buf = fs.alloc_dio_buffer(ctx, IO_SIZE);
+                        buffers[idx] = buf;
+                    }
+
+                    var io: [NUM_IO]?fs.DioWrite = undefined;
+                    for (0..NUM_IO) |idx| {
+                        io[idx] = null;
+                    }
+
+                    self.state = .{
+                        .running = .{
+                            .buffers = buffers,
+                            .io = io,
+                            .offset = 0,
+                            .start_t = Instant.now() catch unreachable,
+                        },
+                    };
+                },
+                .running => |*s| {
+                    var pending: u32 = 0;
+                    io: for (0..NUM_IO) |idx| {
+                        if (ctx.yield_if_needed()) {
+                            return .pending;
+                        }
+                        const io_ptr = &s.io[idx];
+                        var i: u64 = 0;
+                        while (true) : (i += 1) {
+                            if (io_ptr.*) |*io| {
+                                switch (io.poll(ctx)) {
+                                    .ready => {
+                                        io_ptr.* = null;
+                                    },
+                                    .pending => {
+                                        pending += 1;
+                                        continue :io;
+                                    },
+                                }
+                            } else if (self.size == s.offset) {
+                                continue :io;
+                            } else {
+                                const buf = s.buffers[idx];
+                                const buf_data = buf.data();
+                                std.debug.assert(buf_data.len == IO_SIZE);
+                                var prng = Prng.init(s.offset + IO_SIZE * idx);
+                                const buf_out: []u64 = @ptrCast(@alignCast(buf_data));
+                                for (buf_out) |*x| {
+                                    x.* = prng.next();
+                                }
+
+                                io_ptr.* = fs.DioWrite.init(self.fd, buf, s.offset);
+                                s.offset += IO_SIZE;
+                            }
+                        }
+                    }
+
+                    if (s.offset == self.size and pending == 0) {
+                        const now = Instant.now() catch unreachable;
+                        std.log.info("Finished writing in {}us", .{now.since(s.start_t) / 1000});
+                        self.state = .finished;
+                        return .ready;
+                    }
+
+                    return .pending;
+                },
+                .finished => unreachable,
+            }
+        }
     }
 };
 
