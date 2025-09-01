@@ -35,7 +35,7 @@ const MainTask = struct {
         setup_file: SetupFile,
         write: struct { io: Write, fd: linux.fd_t },
         close_file: fs.Close,
-        // delete_file: fs.RemoveFile,
+        delete_file: fs.RemoveFile,
         finished,
     };
 
