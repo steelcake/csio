@@ -7,10 +7,10 @@ pub const IoAlloc = struct {
 
     free_sizes: []u32,
     free_ptrs: []usize,
-    num_free: u16,
+    num_free: u32,
     buf: []align(ALIGN) u8,
 
-    pub fn init(capacity: u32, num_slots: u16, allocator: Allocator) error{OutOfMemory}!IoAlloc {
+    pub fn init(capacity: u32, num_slots: u32, allocator: Allocator) error{OutOfMemory}!IoAlloc {
         if (capacity == 0 or num_slots == 0) {
             return .{
                 .free_sizes = &.{},
@@ -54,8 +54,8 @@ pub const IoAlloc = struct {
         std.debug.assert(len % ALIGN == 0);
 
         // find first sufficient slot
-        var idx: u16 = 0;
-        var min_idx: u16 = while (idx < self.num_free) : (idx += 1) {
+        var idx: u32 = 0;
+        var min_idx: u32 = while (idx < self.num_free) : (idx += 1) {
             const size = self.free_sizes.ptr[idx];
             if (size >= len) {
                 break idx;
@@ -104,7 +104,7 @@ pub const IoAlloc = struct {
 
         // Merge the adjacent free slots together with the new slot.
         // There can be one left and one right free slot adjacent to the one we are freeing now.
-        var idx: u16 = 0;
+        var idx: u32 = 0;
         while (idx < self.num_free) {
             const slot_addr = self.free_ptrs.ptr[idx];
             const slot_size = self.free_sizes.ptr[idx];

@@ -36,14 +36,14 @@ pub const Executor = struct {
     preempt_duration_ns: u64,
 
     pub fn init(params: struct {
-        max_num_tasks: u16 = 1024,
+        max_num_tasks: u32 = 256,
         entries: u16 = 64,
         io_alloc_capacity: u32 = 1 << 28,
         preempt_duration_ns: u64 = 10 * 1000 * 1000,
         wq_fd: ?linux.fd_t,
         alloc: Allocator,
     }) error{ OutOfMemory, IoUringSetupFail, RegisterBuffersFail }!Self {
-        const max_io = params.max_num_tasks * MAX_IO_PER_TASK;
+        const max_io: u32 = params.max_num_tasks * MAX_IO_PER_TASK;
 
         const io_alloc = try IoAlloc.init(params.io_alloc_capacity, max_io, params.alloc);
 
@@ -184,11 +184,11 @@ pub const IoUring = struct {
     // Queued to be pushed to the sq
     io_queue: Queue(linux.io_uring_sqe),
 
-    pending_io: u16,
+    pending_io: u32,
 
     fn init(params: struct {
         entries: u16,
-        max_io: u16,
+        max_io: u32,
         /// file descriptor of another ring, will be used to share background threads with the other ring if passed.
         wq_fd: ?linux.fd_t,
         /// If this argument is true then this ring can only be used for writing/reading from sockets(napi) and files(direct_io)
@@ -198,7 +198,7 @@ pub const IoUring = struct {
     }) error{ OutOfMemory, IoUringSetupFail }!Self {
         std.debug.assert(params.entries > 0);
 
-        var flags: u32 = linux.IORING_SETUP_SQPOLL | linux.IORING_SETUP_COOP_TASKRUN | linux.IORING_SETUP_SINGLE_ISSUER;
+        var flags: u32 = linux.IORING_SETUP_SQPOLL | linux.IORING_SETUP_SINGLE_ISSUER;
 
         if (params.polled_io) {
             flags |= linux.IORING_SETUP_IOPOLL;
@@ -301,7 +301,7 @@ pub const IoUring = struct {
                     switch (e) {
                         error.SignalInterrupt => continue,
                         else => {
-                            std.debug.panic("failed to wakeup sqpoll thread: {}", e);
+                            std.debug.panic("failed to wakeup sqpoll thread: {}", .{e});
                         },
                     }
                 };

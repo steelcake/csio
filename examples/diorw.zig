@@ -6,6 +6,8 @@ const Instant = std.time.Instant;
 const csio = @import("csio");
 const fs = csio.fs;
 
+pub const log_level: std.log.Level = .debug;
+
 pub fn main() !void {
     const mem = try std.heap.page_allocator.alloc(u8, 1 << 30);
     defer std.heap.page_allocator.free(mem);

@@ -9,7 +9,7 @@ const SliceMap = @import("./slice_map.zig").SliceMap;
 const Queue = @import("./queue.zig").Queue;
 const IoUring = @import("./executor.zig").IoUring;
 
-pub const MAX_IO_PER_TASK = 256;
+pub const MAX_IO_PER_TASK = 128;
 
 pub const TaskEntry = struct {
     task: Task,
