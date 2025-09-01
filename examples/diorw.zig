@@ -1,4 +1,5 @@
 const std = @import("std");
+const posix = std.posix;
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const Instant = std.time.Instant;
@@ -10,8 +11,8 @@ const fs = csio.fs;
 pub const log_level: std.log.Level = .debug;
 
 pub fn main() !void {
-    const mem = try std.heap.page_allocator.alloc(u8, 1 << 30);
-    defer std.heap.page_allocator.free(mem);
+    const mem = alloc_thp(1 << 30) orelse unreachable;
+    defer posix.munmap(mem);
 
     var fb_alloc = std.heap.FixedBufferAllocator.init(mem);
     const alloc = fb_alloc.allocator();
@@ -34,7 +35,7 @@ const MainTask = struct {
         setup_file: SetupFile,
         write: struct { io: Write, fd: linux.fd_t },
         close_file: fs.Close,
-        delete_file: fs.RemoveFile,
+        // delete_file: fs.RemoveFile,
         finished,
     };
 
@@ -81,20 +82,22 @@ const MainTask = struct {
                 .close_file => |*cf| {
                     switch (cf.poll(ctx)) {
                         .ready => {
-                            self.state = .{ .delete_file = fs.RemoveFile.init(self.path) };
-                        },
-                        .pending => return .pending,
-                    }
-                },
-                .delete_file => |*df| {
-                    switch (df.poll(ctx)) {
-                        .ready => {
                             self.state = .finished;
                             return .ready;
+                            // self.state = .{ .delete_file = fs.RemoveFile.init(self.path) };
                         },
                         .pending => return .pending,
                     }
                 },
+                // .delete_file => |*df| {
+                //     switch (df.poll(ctx)) {
+                //         .ready => {
+                //             self.state = .finished;
+                //             return .ready;
+                //         },
+                //         .pending => return .pending,
+                //     }
+                // },
                 .finished => unreachable,
             }
         }
@@ -116,8 +119,8 @@ const MainTask = struct {
 const Write = struct {
     const Self = @This();
 
-    const NUM_IO = 4;
-    const IO_SIZE = 1 << 22;
+    const NUM_IO = 16;
+    const IO_SIZE = 1 << 24;
 
     const State = union(enum) {
         start,
@@ -169,15 +172,24 @@ const Write = struct {
                 .running => |*s| {
                     var pending: u32 = 0;
                     io: for (0..NUM_IO) |idx| {
+                        std.log.warn("IDX: {}", .{idx});
                         if (ctx.yield_if_needed()) {
+                            std.log.warn("YIELD", .{});
                             return .pending;
                         }
                         const io_ptr = &s.io[idx];
-                        var i: u64 = 0;
-                        while (true) : (i += 1) {
+                        while (true) {
                             if (io_ptr.*) |*io| {
                                 switch (io.poll(ctx)) {
-                                    .ready => {
+                                    .ready => |res| {
+                                        switch (res) {
+                                            .ok => {},
+                                            .err => |e| switch (e) {
+                                                .short_write => unreachable,
+                                                .os => |os_e| std.debug.panic("failed write: {}", .{os_e}),
+                                            },
+                                        }
+
                                         io_ptr.* = null;
                                     },
                                     .pending => {
@@ -191,17 +203,23 @@ const Write = struct {
                                 const buf = s.buffers[idx];
                                 const buf_data = buf.data();
                                 std.debug.assert(buf_data.len == IO_SIZE);
+
+                                const sq = Instant.now() catch unreachable;
                                 var prng = Prng.init(s.offset + IO_SIZE * idx);
                                 const buf_out: []u64 = @ptrCast(@alignCast(buf_data));
                                 for (buf_out) |*x| {
                                     x.* = prng.next();
                                 }
+                                const now = Instant.now() catch unreachable;
+                                std.log.warn("SSS: {}", .{now.since(sq) / 1000});
 
                                 io_ptr.* = fs.DioWrite.init(self.fd, buf, s.offset);
                                 s.offset += IO_SIZE;
                             }
                         }
                     }
+
+                    std.log.warn("OFFSET == {}", .{s.offset});
 
                     if (s.offset == self.size and pending == 0) {
                         const now = Instant.now() catch unreachable;
@@ -278,7 +296,7 @@ const SetupFile = struct {
                                             .DSYNC = true,
                                             .DIRECT = true,
                                         },
-                                        600,
+                                        0o666,
                                     ),
                                     .start_t = now,
                                 },
@@ -321,8 +339,9 @@ const SetupFile = struct {
                             const now = Instant.now() catch unreachable;
                             std.log.info("It took {}us to fallocate", .{now.since(s.start_t) / 1000});
 
+                            const fd = s.fd;
                             self.state = .finished;
-                            return .{ .ready = s.fd };
+                            return .{ .ready = fd };
                         },
                         .pending => return .pending,
                     }
@@ -332,3 +351,27 @@ const SetupFile = struct {
         }
     }
 };
+
+fn alloc_thp(size: usize) ?[]align(1 << 12) u8 {
+    if (size == 0) {
+        return null;
+    }
+    const alloc_size = fs.align_forward(size, 1 << 21);
+    const page = mmap_wrapper(alloc_size, 0) orelse return null;
+    posix.madvise(page.ptr, page.len, posix.MADV.HUGEPAGE) catch {
+        posix.munmap(page);
+        return null;
+    };
+    return page;
+}
+
+fn mmap_wrapper(size: usize, huge_page_flag: u32) ?[]align(1 << 12) u8 {
+    if (size == 0) {
+        return null;
+    }
+    const flags = linux.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true, .HUGETLB = huge_page_flag != 0, .POPULATE = true, .LOCKED = true };
+    const flags_int: u32 = @bitCast(flags);
+    const flags_f: linux.MAP = @bitCast(flags_int | huge_page_flag);
+    const page = posix.mmap(null, size, posix.PROT.READ | posix.PROT.WRITE, flags_f, -1, 0) catch return null;
+    return page;
+}

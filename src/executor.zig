@@ -271,7 +271,7 @@ pub const IoUring = struct {
 
     pub fn queue_io(self: *Self, sqe: linux.io_uring_sqe) void {
         self.io_queue.push(sqe) catch unreachable;
-        self.sync_sq();
+        // self.sync_sq();
     }
 
     fn sync_sq(self: *Self) void {

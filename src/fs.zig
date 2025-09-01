@@ -181,8 +181,9 @@ pub const DioWrite = union(enum) {
                     }
 
                     if (num_pending == 0) {
+                        const e = s.e;
                         self.* = .finished;
-                        return .{ .ready = .{ .err = s.e } };
+                        return .{ .ready = .{ .err = e } };
                     } else {
                         return .pending;
                     }
@@ -307,8 +308,9 @@ pub const DioRead = union(enum) {
                     }
 
                     if (num_pending == 0 and s.size == 0) {
+                        const io_buf = s.io_buf;
                         self.* = .finished;
-                        return .{ .ready = s.io_buf };
+                        return .{ .ready = io_buf };
                     }
 
                     // queue new io
@@ -355,8 +357,9 @@ pub const DioRead = union(enum) {
                     }
 
                     if (num_pending == 0) {
+                        const e = s.e;
                         self.* = .finished;
-                        return .{ .ready = .{ .err = s.e } };
+                        return .{ .ready = .{ .err = e } };
                     } else {
                         return .pending;
                     }
