@@ -3,7 +3,8 @@ const linux = std.os.linux;
 
 const task_mod = @import("./task.zig");
 const Context = task_mod.Context;
-const PollResult = task_mod.PollResult;
+const Poll = task_mod.Poll;
+const Result = task_mod.Result;
 const IoAlloc = @import("io_alloc.zig").IoAlloc;
 
 /// Allocate a buffer suitable for doing direct_io
@@ -34,7 +35,10 @@ pub const DioWrite = union(enum) {
 
     const Self = @This();
 
-    const Error = linux.E || error{ShortWrite};
+    pub const Error = union(enum) {
+        short_write,
+        os: linux.E,
+    };
 
     start: struct {
         fd: linux.fd_t,
@@ -71,13 +75,13 @@ pub const DioWrite = union(enum) {
         };
     }
 
-    pub fn poll(self: *Self, ctx: Context) PollResult(Error!void) {
+    pub fn poll(self: *Self, ctx: Context) Poll(Result(void, Error)) {
         poll: while (true) {
             switch (self.*) {
                 .start => |*s| {
                     if (s.buf.size() == 0) {
                         self.* = .finished;
-                        return .{ .ready = {} };
+                        return .{ .ready = .{ .ok = {} } };
                     }
 
                     var io_is_running: [CONCURRENCY]bool = undefined;
@@ -109,12 +113,12 @@ pub const DioWrite = union(enum) {
                                         const n_wrote: u32 = @intCast(cqe.res);
                                         std.debug.assert(n_wrote <= s.io_size[io_idx]);
                                         if (n_wrote < s.io_size[io_idx]) {
-                                            self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = error.ShortWrite } };
+                                            self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = .{ .short_write = {} } } };
                                             continue :poll;
                                         }
                                     },
                                     else => |e| {
-                                        self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = e } };
+                                        self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = .{ .os = e } } };
                                         continue :poll;
                                     },
                                 }
@@ -126,7 +130,7 @@ pub const DioWrite = union(enum) {
 
                     if (num_pending == 0 and s.io_buf.size() == s.offset) {
                         self.* = .finished;
-                        return .{ .ready = .{} };
+                        return .{ .ready = .{ .ok = {} } };
                     }
 
                     // queue new io
@@ -174,7 +178,7 @@ pub const DioWrite = union(enum) {
 
                     if (num_pending == 0) {
                         self.* = .finished;
-                        return .{ .ready = s.e };
+                        return .{ .ready = .{ .err = s.e } };
                     } else {
                         return .pending;
                     }
@@ -191,7 +195,10 @@ pub const DioRead = union(enum) {
 
     const Self = @This();
 
-    const Error = linux.E || error{ShortRead};
+    pub const Error = union(enum) {
+        short_read,
+        os: linux.E,
+    };
 
     start: struct {
         fd: linux.fd_t,
@@ -224,18 +231,20 @@ pub const DioRead = union(enum) {
         };
     }
 
-    pub fn poll(self: *Self, ctx: Context) PollResult(Error!DioBuf) {
+    pub fn poll(self: *Self, ctx: Context) Poll(Result(DioBuf, Error)) {
         poll: while (true) {
             switch (self.*) {
                 .start => |*s| {
                     if (s.size == 0) {
                         self.* = .finished;
                         return .{
-                            .ready = DioBuf{
-                                .alloc_buf = &.{},
-                                .alloc = ctx.io_alloc,
-                                .data_start = 0,
-                                .data_end = 0,
+                            .ready = .{
+                                .ok = DioBuf{
+                                    .alloc_buf = &.{},
+                                    .alloc = ctx.io_alloc,
+                                    .data_start = 0,
+                                    .data_end = 0,
+                                },
                             },
                         };
                     }
@@ -278,12 +287,12 @@ pub const DioRead = union(enum) {
                                         const n_read: u32 = @intCast(cqe.res);
                                         std.debug.assert(n_read <= s.io_size[io_idx]);
                                         if (n_read < s.io_size[io_idx]) {
-                                            self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = error.ShortRead } };
+                                            self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = .{ .short_read = {} } } };
                                             continue :poll;
                                         }
                                     },
                                     else => |e| {
-                                        self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = e } };
+                                        self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = .{ .os = e } } };
                                         continue :poll;
                                     },
                                 }
@@ -343,7 +352,7 @@ pub const DioRead = union(enum) {
 
                     if (num_pending == 0) {
                         self.* = .finished;
-                        return .{ .ready = s.e };
+                        return .{ .ready = .{ .err = s.e } };
                     } else {
                         return .pending;
                     }
@@ -391,7 +400,7 @@ pub const Mkdir = struct {
         };
     }
 
-    pub fn poll(self: *Mkdir, ctx: Context) PollResult(!void) {
+    pub fn poll(self: *Mkdir, ctx: Context) Poll(Result(void, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -400,9 +409,9 @@ pub const Mkdir = struct {
                 switch (cqe.err()) {
                     .SUCCESS => {
                         std.debug.assert(cqe.res == 0);
-                        return;
+                        return .{ .ready = .{ .ok = {} } };
                     },
-                    else => |e| return .{ .ready = e },
+                    else => |e| return .{ .ready = .{ .err = e } },
                 }
             } else {
                 return .pending;
@@ -425,7 +434,7 @@ pub const RemoveFile = struct {
         };
     }
 
-    pub fn poll(self: *RemoveFile, ctx: Context) PollResult(!void) {
+    pub fn poll(self: *RemoveFile, ctx: Context) Poll(Result(void, linux.E)) {
         return self.inner.poll(ctx);
     }
 };
@@ -439,7 +448,7 @@ pub const RemoveDir = struct {
         };
     }
 
-    pub fn poll(self: *RemoveDir, ctx: Context) PollResult(!void) {
+    pub fn poll(self: *RemoveDir, ctx: Context) Poll(Result(void, linux.E)) {
         return self.inner.poll(ctx);
     }
 };
@@ -460,7 +469,7 @@ pub const UnlinkAt = struct {
         };
     }
 
-    pub fn poll(self: *UnlinkAt, ctx: Context) PollResult(!void) {
+    pub fn poll(self: *UnlinkAt, ctx: Context) Poll(Result(void, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -469,9 +478,9 @@ pub const UnlinkAt = struct {
                 switch (cqe.err()) {
                     .SUCCESS => {
                         std.debug.assert(cqe.res == 0);
-                        return;
+                        return .{ .ready = .{ .ok = {} } };
                     },
-                    else => |e| return .{ .ready = e },
+                    else => |e| return .{ .ready = .{ .err = e } },
                 }
             } else {
                 return .pending;
@@ -503,15 +512,15 @@ pub const Write = struct {
         };
     }
 
-    pub fn poll(self: *Write, ctx: Context) PollResult(!usize) {
+    pub fn poll(self: *Write, ctx: Context) Poll(Result(usize, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
                 self.finished = true;
                 switch (cqe.err()) {
-                    .SUCCESS => return @intCast(cqe.res),
-                    else => |e| return .{ .ready = e },
+                    .SUCCESS => return .{ .ready = .{ .ok = @intCast(cqe.res) } },
+                    else => |e| return .{ .ready = .{ .err = e } },
                 }
             } else {
                 return .pending;
@@ -543,15 +552,15 @@ pub const Read = struct {
         };
     }
 
-    pub fn poll(self: *Read, ctx: Context) PollResult(!usize) {
+    pub fn poll(self: *Read, ctx: Context) Poll(Result(usize, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
                 self.finished = true;
                 switch (cqe.err()) {
-                    .SUCCESS => return @intCast(cqe.res),
-                    else => |e| return .{ .ready = e },
+                    .SUCCESS => return .{ .ready = .{ .ok = @intCast(cqe.res) } },
+                    else => |e| return .{ .ready = .{ .err = e } },
                 }
             } else {
                 return .pending;
@@ -583,7 +592,7 @@ pub const Open = struct {
         };
     }
 
-    pub fn poll(self: *Open, ctx: Context) PollResult(!linux.fd_t) {
+    pub fn poll(self: *Open, ctx: Context) Poll(Result(linux.fd_t, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -591,8 +600,8 @@ pub const Open = struct {
                 self.finished = true;
 
                 switch (cqe.err()) {
-                    .SUCCESS => return @intCast(cqe.res),
-                    else => |e| return .{ .ready = e },
+                    .SUCCESS => return .{ .ready = .{ .ok = @intCast(cqe.res) } },
+                    else => |e| return .{ .ready = .{ .err = e } },
                 }
             } else {
                 return .pending;
@@ -616,15 +625,15 @@ pub const Close = struct {
         return .{ .fd = fd, .io_id = null, .finished = false };
     }
 
-    pub fn poll(self: *Close, ctx: Context) PollResult(!void) {
+    pub fn poll(self: *Close, ctx: Context) Poll(Result(void, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
             if (ctx.remove_io_result(io_id)) |cqe| {
                 self.finished = true;
                 switch (cqe.err()) {
-                    .SUCCESS => return,
-                    else => |e| return .{ .ready = e },
+                    .SUCCESS => return .{ .ready = .{ .ok = {} } },
+                    else => |e| return .{ .ready = .{ .err = e } },
                 }
             } else {
                 return .pending;
@@ -658,7 +667,7 @@ pub const FAllocate = struct {
         };
     }
 
-    pub fn poll(self: *FAllocate, ctx: Context) PollResult(!void) {
+    pub fn poll(self: *FAllocate, ctx: Context) Poll(Result(void, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -667,9 +676,9 @@ pub const FAllocate = struct {
                 switch (cqe.err()) {
                     .SUCCESS => {
                         std.debug.assert(cqe.res == 0);
-                        return .{ .ready = {} };
+                        return .{ .ready = .{ .ok = {} } };
                     },
-                    else => |e| return .{ .ready = e },
+                    else => |e| return .{ .ready = .{ .err = e } },
                 }
             } else {
                 return .pending;

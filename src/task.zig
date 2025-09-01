@@ -67,7 +67,14 @@ pub const Context = struct {
     }
 };
 
-pub fn PollResult(comptime T: type) type {
+pub fn Result(comptime T: type, comptime E: type) type {
+    return union(enum) {
+        ok: T,
+        err: E,
+    };
+}
+
+pub fn Poll(comptime T: type) type {
     return union(enum) {
         ready: T,
         pending,
@@ -76,9 +83,9 @@ pub fn PollResult(comptime T: type) type {
 
 pub const Task = struct {
     ptr: *anyopaque,
-    poll_fn: *const fn (*anyopaque, ctx: *const Context) PollResult(void),
+    poll_fn: *const fn (*anyopaque, ctx: *const Context) Poll(void),
 
-    pub fn poll(self: Task, ctx: *const Context) PollResult(void) {
+    pub fn poll(self: Task, ctx: *const Context) Poll(void) {
         return self.poll_fn(self.ptr, ctx);
     }
 };
