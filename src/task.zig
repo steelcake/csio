@@ -57,8 +57,10 @@ pub const Context = struct {
     pub fn remove_io_result(self: *const Context, io_id: u64) ?linux.io_uring_cqe {
         for (self.task_entry.finished_io[0..self.task_entry.num_finished_io], 0..) |cqe, idx| {
             if (cqe.user_data == io_id) {
+                const task_id = self.io.remove(io_id) orelse unreachable;
                 self.task_entry.num_finished_io -= 1;
                 self.task_entry.finished_io[idx] = self.task_entry.finished_io[self.task_entry.num_finished_io];
+                std.debug.assert(task_id == self.task_id);
                 return cqe;
             }
         }

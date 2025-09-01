@@ -132,7 +132,10 @@ const SetupFile = struct {
                 .remove => |*s| {
                     switch (s.io.poll(ctx)) {
                         .ready => |res| {
-                            if (res == .err) unreachable;
+                            switch (res) {
+                                .err => |e| if (e != linux.E.NOENT) std.debug.panic("failed to remove file: {}", .{e}),
+                                .ok => {},
+                            }
 
                             const now = Instant.now() catch unreachable;
 
@@ -143,9 +146,11 @@ const SetupFile = struct {
                                     .io = fs.Open.init(
                                         self.path,
                                         linux.O{
+                                            .ACCMODE = .RDWR,
                                             .CREAT = true,
                                             .EXCL = true,
                                             .DSYNC = true,
+                                            .DIRECT = true,
                                         },
                                         600,
                                     ),
@@ -182,7 +187,10 @@ const SetupFile = struct {
                 .fallocate => |*s| {
                     switch (s.io.poll(ctx)) {
                         .ready => |res| {
-                            if (res == .err) unreachable;
+                            switch (res) {
+                                .err => |e| std.debug.panic("failed to fallocate: {}", .{e}),
+                                .ok => {},
+                            }
 
                             const now = Instant.now() catch unreachable;
                             std.log.info("It took {}us to fallocate", .{now.since(s.start_t) / 1000});

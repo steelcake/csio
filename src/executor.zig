@@ -270,27 +270,18 @@ pub const IoUring = struct {
     }
 
     pub fn queue_io(self: *Self, sqe: linux.io_uring_sqe) void {
-        while (true) {
-            const sqe_ptr = self.ring.get_sqe() catch {
-                self.io_queue.push(sqe) catch unreachable;
-                return;
-            };
-            if (self.io_queue.pop()) |queued_sqe| {
-                sqe_ptr.* = queued_sqe;
-            } else {
-                sqe_ptr.* = sqe;
-                return;
-            }
-        }
+        self.io_queue.push(sqe) catch unreachable;
+        self.sync_sq();
     }
 
     fn sync_sq(self: *Self) void {
         while (self.io_queue.len > 0) {
-            const sqe_ptr = self.ring.get_sqe() catch return;
+            const sqe_ptr = self.ring.get_sqe() catch break;
             self.pending_io += 1;
             const sqe = self.io_queue.pop() orelse unreachable;
             sqe_ptr.* = sqe;
         }
+        _ = self.ring.flush_sq();
     }
 
     fn maybe_wakeup(self: *Self) void {
