@@ -12,7 +12,7 @@ const IoAlloc = @import("io_alloc.zig").IoAlloc;
 /// Intended to be used for `DioFile.write`
 ///
 /// Caller should release the memory by calling `DioBuf.free` after their use is done.
-pub fn alloc_dio_buffer(ctx: Context, size: u32) DioBuf {
+pub fn alloc_dio_buffer(ctx: *const Context, size: u32) DioBuf {
     return DioBuf{
         .alloc_buf = ctx.io_alloc.alloc(size) catch unreachable,
         .alloc = ctx.io_alloc,
@@ -75,7 +75,7 @@ pub const DioWrite = union(enum) {
         };
     }
 
-    pub fn poll(self: *Self, ctx: Context) Poll(Result(void, Error)) {
+    pub fn poll(self: *Self, ctx: *const Context) Poll(Result(void, Error)) {
         poll: while (true) {
             switch (self.*) {
                 .start => |*s| {
@@ -231,7 +231,7 @@ pub const DioRead = union(enum) {
         };
     }
 
-    pub fn poll(self: *Self, ctx: Context) Poll(Result(DioBuf, Error)) {
+    pub fn poll(self: *Self, ctx: *const Context) Poll(Result(DioBuf, Error)) {
         poll: while (true) {
             switch (self.*) {
                 .start => |*s| {
@@ -400,7 +400,7 @@ pub const Mkdir = struct {
         };
     }
 
-    pub fn poll(self: *Mkdir, ctx: Context) Poll(Result(void, linux.E)) {
+    pub fn poll(self: *Mkdir, ctx: *const Context) Poll(Result(void, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -434,7 +434,7 @@ pub const RemoveFile = struct {
         };
     }
 
-    pub fn poll(self: *RemoveFile, ctx: Context) Poll(Result(void, linux.E)) {
+    pub fn poll(self: *RemoveFile, ctx: *const Context) Poll(Result(void, linux.E)) {
         return self.inner.poll(ctx);
     }
 };
@@ -448,7 +448,7 @@ pub const RemoveDir = struct {
         };
     }
 
-    pub fn poll(self: *RemoveDir, ctx: Context) Poll(Result(void, linux.E)) {
+    pub fn poll(self: *RemoveDir, ctx: *const Context) Poll(Result(void, linux.E)) {
         return self.inner.poll(ctx);
     }
 };
@@ -469,7 +469,7 @@ pub const UnlinkAt = struct {
         };
     }
 
-    pub fn poll(self: *UnlinkAt, ctx: Context) Poll(Result(void, linux.E)) {
+    pub fn poll(self: *UnlinkAt, ctx: *const Context) Poll(Result(void, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -487,7 +487,7 @@ pub const UnlinkAt = struct {
             }
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_unlinkat(&sqe, linux.AT.FDCWD, self.path, self.flags);
+            sqe.prep_unlinkat(linux.AT.FDCWD, self.path, self.flags);
             self.io_id = ctx.queue_io(false, sqe);
             return .pending;
         }
@@ -512,7 +512,7 @@ pub const Write = struct {
         };
     }
 
-    pub fn poll(self: *Write, ctx: Context) Poll(Result(usize, linux.E)) {
+    pub fn poll(self: *Write, ctx: *const Context) Poll(Result(usize, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -552,7 +552,7 @@ pub const Read = struct {
         };
     }
 
-    pub fn poll(self: *Read, ctx: Context) Poll(Result(usize, linux.E)) {
+    pub fn poll(self: *Read, ctx: *const Context) Poll(Result(usize, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -576,13 +576,13 @@ pub const Read = struct {
 
 pub const Open = struct {
     path: [:0]const u8,
-    flags: i32,
+    flags: linux.O,
     mode: linux.mode_t,
 
     io_id: ?u64,
     finished: bool,
 
-    pub fn init(path: [:0]const u8, flags: i32, mode: linux.mode_t) Open {
+    pub fn init(path: [:0]const u8, flags: linux.O, mode: linux.mode_t) Open {
         return .{
             .path = path,
             .flags = flags,
@@ -592,7 +592,7 @@ pub const Open = struct {
         };
     }
 
-    pub fn poll(self: *Open, ctx: Context) Poll(Result(linux.fd_t, linux.E)) {
+    pub fn poll(self: *Open, ctx: *const Context) Poll(Result(linux.fd_t, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -608,7 +608,7 @@ pub const Open = struct {
             }
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_openat(&sqe, linux.AT.FDCWD, self.path, self.flags, self.mode);
+            sqe.prep_openat(linux.AT.FDCWD, self.path, self.flags, self.mode);
             self.io_id = ctx.queue_io(false, sqe);
             return .pending;
         }
@@ -625,7 +625,7 @@ pub const Close = struct {
         return .{ .fd = fd, .io_id = null, .finished = false };
     }
 
-    pub fn poll(self: *Close, ctx: Context) Poll(Result(void, linux.E)) {
+    pub fn poll(self: *Close, ctx: *const Context) Poll(Result(void, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {
@@ -667,7 +667,7 @@ pub const FAllocate = struct {
         };
     }
 
-    pub fn poll(self: *FAllocate, ctx: Context) Poll(Result(void, linux.E)) {
+    pub fn poll(self: *FAllocate, ctx: *const Context) Poll(Result(void, linux.E)) {
         std.debug.assert(!self.finished);
 
         if (self.io_id) |io_id| {

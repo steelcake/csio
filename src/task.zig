@@ -42,7 +42,7 @@ pub const Context = struct {
         entry.num_pending_io += 1;
 
         var sqe = io;
-        const io_id = self.io.insert(self.task_id);
+        const io_id = self.io.insert(self.task_id) catch unreachable;
         sqe.user_data = io_id;
 
         if (polled) {

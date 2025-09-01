@@ -9,6 +9,8 @@ pub fn SliceMap(comptime K: type, comptime V: type) type {
         values: []V,
         len: u32,
 
+        pub const KeyValue = struct { key: K, value: V };
+
         pub fn init(capacity: u32, alloc: Allocator) error{OutOfMemory}!Self {
             const keys = try alloc.alloc(K, capacity);
             const values = try alloc.alloc(V, capacity);
@@ -25,7 +27,7 @@ pub fn SliceMap(comptime K: type, comptime V: type) type {
             alloc.free(self.values);
         }
 
-        pub fn swap_remove(self: *Self, index: u32) ?struct { key: K, value: V } {
+        pub fn swap_remove(self: *Self, index: u32) ?KeyValue {
             if (index >= self.len) {
                 return null;
             }
@@ -33,7 +35,7 @@ pub fn SliceMap(comptime K: type, comptime V: type) type {
             // useless but for clarity
             std.debug.assert(self.len > 0);
 
-            const out = .{ .value = self.values[index], .key = self.keys[index] };
+            const out = KeyValue{ .value = self.values[index], .key = self.keys[index] };
 
             const end = self.len - 1;
             self.keys[index] = self.keys[end];

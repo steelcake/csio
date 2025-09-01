@@ -8,7 +8,8 @@ pub const fs = @import("./fs.zig");
 pub const Executor = executor.Executor;
 pub const Task = task.Task;
 pub const Context = task.Context;
-pub const PollResult = task.PollResult;
+pub const Poll = task.Poll;
+pub const Result = task.Result;
 pub const MAX_IO_PER_TASK = task.MAX_IO_PER_TASK;
 
 test {

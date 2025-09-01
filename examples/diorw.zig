@@ -45,7 +45,7 @@ const MainTask = struct {
         };
     }
 
-    fn poll(self: *Self, ctx: *const csio.Context) csio.PollResult(void) {
+    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(void) {
         while (true) {
             switch (self.state) {
                 .start => {
@@ -77,7 +77,7 @@ const MainTask = struct {
         }
     }
 
-    fn poll_fn(ptr: *anyopaque, ctx: *const csio.Context) csio.PollResult(void) {
+    fn poll_fn(ptr: *anyopaque, ctx: *const csio.Context) csio.Poll(void) {
         const self: *Self = @ptrCast(@alignCast(ptr));
         return self.poll(ctx);
     }
@@ -116,7 +116,7 @@ const SetupFile = struct {
         };
     }
 
-    fn poll(self: *Self, ctx: *const csio.Context) csio.PollResult(linux.fd_t) {
+    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(linux.fd_t) {
         while (true) {
             switch (self.state) {
                 .start => {
@@ -130,7 +130,7 @@ const SetupFile = struct {
                 .remove => |*s| {
                     switch (s.io.poll(ctx)) {
                         .ready => |res| {
-                            res catch unreachable;
+                            if (res == .err) unreachable;
 
                             const now = Instant.now() catch unreachable;
 
@@ -157,7 +157,10 @@ const SetupFile = struct {
                 .open => |*s| {
                     switch (s.io.poll(ctx)) {
                         .ready => |res| {
-                            const fd = res catch unreachable;
+                            const fd = switch (res) {
+                                .ok => |fd| fd,
+                                .err => unreachable,
+                            };
 
                             const now = Instant.now() catch unreachable;
 
@@ -177,7 +180,7 @@ const SetupFile = struct {
                 .fallocate => |*s| {
                     switch (s.io.poll(ctx)) {
                         .ready => |res| {
-                            res catch unreachable;
+                            if (res == .err) unreachable;
 
                             const now = Instant.now() catch unreachable;
                             std.log.info("It took {}us to fallocate", .{now.since(s.start_t) / 1000});
