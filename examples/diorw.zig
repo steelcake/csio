@@ -23,7 +23,7 @@ pub fn main() !void {
     });
     defer exec.deinit(alloc);
 
-    var main_task = MainTask.init("testfile", 1 << 34);
+    var main_task = MainTask.init("testfile", 1 << 32);
     exec.run(main_task.task());
 }
 
@@ -35,6 +35,7 @@ const MainTask = struct {
         setup_file: SetupFile,
         write: struct { io: Write, fd: linux.fd_t },
         close_file: fs.Close,
+        read: Read,
         delete_file: fs.RemoveFile,
         finished,
     };
@@ -82,6 +83,14 @@ const MainTask = struct {
                 .close_file => |*cf| {
                     switch (cf.poll(ctx)) {
                         .ready => {
+                            self.state = .{ .read = Read.init(self.path, self.file_size) };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .read => |*r| {
+                    switch (r.poll(ctx)) {
+                        .ready => {
                             self.state = .{ .delete_file = fs.RemoveFile.init(self.path) };
                         },
                         .pending => return .pending,
@@ -114,11 +123,160 @@ const MainTask = struct {
     }
 };
 
-const Write = struct {
+const NUM_IO = 10;
+const IO_SIZE = 1 << 20;
+
+const Read = struct {
     const Self = @This();
 
-    const NUM_IO = 10;
-    const IO_SIZE = 1 << 20;
+    const State = union(enum) {
+        start,
+        open: struct { start_t: Instant, io: fs.Open },
+        read: struct {
+            fd: linux.fd_t,
+            io: [NUM_IO]?fs.DioRead,
+            io_offset: [NUM_IO]u64,
+            offset: u64,
+            start_t: Instant,
+        },
+        close: struct { start_t: Instant, io: fs.Close },
+        finished,
+    };
+
+    path: [:0]const u8,
+    file_size: u64,
+    state: State,
+
+    fn init(path: [:0]const u8, file_size: u64) Self {
+        return .{
+            .path = path,
+            .file_size = file_size,
+            .state = .start,
+        };
+    }
+
+    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(void) {
+        while (true) {
+            switch (self.state) {
+                .start => {
+                    self.state = .{
+                        .open = .{
+                            .io = fs.Open.init(
+                                self.path,
+                                linux.O{
+                                    .ACCMODE = .RDONLY,
+                                    .DIRECT = true,
+                                },
+                                0,
+                            ),
+                            .start_t = Instant.now() catch unreachable,
+                        },
+                    };
+                },
+                .open => |*o| {
+                    switch (o.io.poll(ctx)) {
+                        .ready => |res| {
+                            switch (res) {
+                                .ok => |fd| {
+                                    const now = Instant.now() catch unreachable;
+
+                                    std.log.info("It took {}us to open file for reading.", .{now.since(o.start_t) / 1000});
+
+                                    var io: [NUM_IO]?fs.DioRead = undefined;
+                                    for (0..NUM_IO) |idx| {
+                                        io[idx] = null;
+                                    }
+
+                                    self.state = .{
+                                        .read = .{
+                                            .fd = fd,
+                                            .io = io,
+                                            .io_offset = undefined,
+                                            .offset = 0,
+                                            .start_t = now,
+                                        },
+                                    };
+                                },
+                                .err => |e| std.debug.panic("failed to open file for reading: {}", .{e}),
+                            }
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .read => |*r| {
+                    var pending: u32 = 0;
+                    io: for (0..NUM_IO) |idx| {
+                        if (ctx.yield_if_needed()) {
+                            return .pending;
+                        }
+                        const io_ptr = &r.io[idx];
+                        while (true) {
+                            if (io_ptr.*) |*io| {
+                                switch (io.poll(ctx)) {
+                                    .ready => |res| {
+                                        switch (res) {
+                                            .ok => |buf| {
+                                                defer fs.free_dio_buffer(ctx, buf);
+
+                                                std.debug.assert(buf.data().len == IO_SIZE);
+
+                                                const buf_typed: []const u64 = @ptrCast(@alignCast(buf.data()));
+
+                                                var prng = Prng.init(r.io_offset[idx]);
+                                                for (buf_typed) |x| {
+                                                    std.debug.assert(x == prng.next());
+                                                }
+
+                                                io_ptr.* = null;
+                                            },
+                                            .err => |e| switch (e) {
+                                                .short_read => unreachable,
+                                                .os => |os_e| std.debug.panic("failed read: {}", .{os_e}),
+                                            },
+                                        }
+                                    },
+                                    .pending => {
+                                        pending += 1;
+                                        continue :io;
+                                    },
+                                }
+                            } else if (self.file_size == r.offset) {
+                                continue :io;
+                            } else {
+                                io_ptr.* = fs.DioRead.init(r.fd, r.offset, IO_SIZE);
+                                r.io_offset[idx] = r.offset;
+                                r.offset += IO_SIZE;
+                            }
+                        }
+                    }
+
+                    if (r.offset == self.file_size and pending == 0) {
+                        const now = Instant.now() catch unreachable;
+                        std.log.info("Finished reading in {}us", .{now.since(r.start_t) / 1000});
+                        self.state = .{ .close = .{ .io = fs.Close.init(r.fd), .start_t = now } };
+                    } else {
+                        return .pending;
+                    }
+                },
+                .close => |*c| {
+                    switch (c.io.poll(ctx)) {
+                        .ready => {
+                            const now = Instant.now() catch unreachable;
+                            std.log.info("Finished closing file in {}us", .{now.since(c.start_t) / 1000});
+                            self.state = .finished;
+                            return .ready;
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .finished => unreachable,
+            }
+        }
+    }
+};
+
+const Write = struct {
+    const Self = @This();
 
     const State = union(enum) {
         start,
@@ -200,7 +358,7 @@ const Write = struct {
                                 const buf_data = buf.data();
                                 std.debug.assert(buf_data.len == IO_SIZE);
 
-                                var prng = Prng.init(s.offset + IO_SIZE * idx);
+                                var prng = Prng.init(s.offset);
                                 const buf_out: []u64 = @ptrCast(@alignCast(buf_data));
                                 for (buf_out) |*x| {
                                     x.* = prng.next();

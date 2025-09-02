@@ -216,7 +216,7 @@ pub const DioRead = union(enum) {
         size: u32,
         io_buf: DioBuf,
         io_id: [CONCURRENCY]u64,
-        io_size: [CONCURRENCY]u16,
+        io_size: [CONCURRENCY]u32,
         io_is_running: [CONCURRENCY]bool,
     },
     fail: struct {
@@ -246,7 +246,6 @@ pub const DioRead = union(enum) {
                             .ready = .{
                                 .ok = DioBuf{
                                     .alloc_buf = &.{},
-                                    .alloc = ctx.io_alloc,
                                     .data_start = 0,
                                     .data_end = 0,
                                 },
@@ -255,12 +254,11 @@ pub const DioRead = union(enum) {
                     }
 
                     const read_offset = align_backward(s.offset, IoAlloc.ALIGN);
-                    const read_size = align_forward(s.size, IoAlloc.ALIGN) + (s.offset - read_offset);
+                    const read_size: u32 = @intCast(align_forward(s.size, IoAlloc.ALIGN) + (s.offset - read_offset));
                     const buf = DioBuf{
                         .alloc_buf = ctx.io_alloc.alloc(read_size) catch unreachable,
-                        .alloc = ctx.io_alloc,
-                        .data_start = s.offset - read_offset,
-                        .data_end = (s.offset - read_offset) + s.size,
+                        .data_start = @intCast(s.offset - read_offset),
+                        .data_end = @intCast((s.offset - read_offset) + s.size),
                     };
 
                     var io_is_running: [CONCURRENCY]bool = undefined;
@@ -310,7 +308,7 @@ pub const DioRead = union(enum) {
                     if (num_pending == 0 and s.size == 0) {
                         const io_buf = s.io_buf;
                         self.* = .finished;
-                        return .{ .ready = io_buf };
+                        return .{ .ready = .{ .ok = io_buf } };
                     }
 
                     // queue new io
@@ -320,7 +318,7 @@ pub const DioRead = union(enum) {
                         }
 
                         if (!s.io_is_running[io_idx]) {
-                            const io_buf_ptr: [*]u8 = @ptrFromInt(@intFromPtr(s.io_buf.alloc_buf.ptr) + s.io_buf.alloc_buf.len - self.size);
+                            const io_buf_ptr: [*]u8 = @ptrFromInt(@intFromPtr(s.io_buf.alloc_buf.ptr) + s.io_buf.alloc_buf.len - s.size);
 
                             const io_offset = s.offset;
                             const io_size = @min(MAX_IO_SIZE, s.size);
@@ -334,8 +332,8 @@ pub const DioRead = union(enum) {
                             };
 
                             var sqe = std.mem.zeroes(linux.io_uring_sqe);
-                            sqe.prep_read_fixed(&sqe, s.fd, &iovec, io_offset, 0);
-                            s.io_id = ctx.queue_io(true, sqe);
+                            sqe.prep_read_fixed(s.fd, &iovec, io_offset, 0);
+                            s.io_id[io_idx] = ctx.queue_io(true, sqe);
                             s.io_size[io_idx] = io_size;
                             s.io_is_running[io_idx] = true;
                         }
