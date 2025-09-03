@@ -3,7 +3,6 @@ const posix = std.posix;
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const Instant = std.time.Instant;
-const Prng = std.Random.SplitMix64;
 
 const csio = @import("csio");
 const fs = csio.fs;
@@ -123,8 +122,8 @@ const MainTask = struct {
     }
 };
 
-const NUM_IO = 10;
-const IO_SIZE = 1 << 20;
+const NUM_IO = 64;
+const IO_SIZE = 1 << 19;
 
 const Read = struct {
     const Self = @This();
@@ -222,10 +221,12 @@ const Read = struct {
 
                                                 const buf_typed: []const u64 = @ptrCast(@alignCast(buf.data()));
 
-                                                var prng = Prng.init(r.io_offset[idx]);
-                                                for (buf_typed) |x| {
-                                                    std.debug.assert(x == prng.next());
+                                                const io_offset = r.io_offset[idx];
+                                                var mismatch: bool = false;
+                                                for (buf_typed, 0..) |x, i| {
+                                                    mismatch |= x != io_offset +% i;
                                                 }
+                                                std.debug.assert(!mismatch);
 
                                                 io_ptr.* = null;
                                             },
@@ -358,10 +359,9 @@ const Write = struct {
                                 const buf_data = buf.data();
                                 std.debug.assert(buf_data.len == IO_SIZE);
 
-                                var prng = Prng.init(s.offset);
-                                const buf_out: []u64 = @ptrCast(@alignCast(buf_data));
-                                for (buf_out) |*x| {
-                                    x.* = prng.next();
+                                const buf_data_out: []u64 = @ptrCast(@alignCast(buf_data));
+                                for (0..buf_data_out.len) |i| {
+                                    buf_data_out.ptr[i] = i +% s.offset;
                                 }
 
                                 io_ptr.* = fs.DioWrite.init(self.fd, buf, s.offset);

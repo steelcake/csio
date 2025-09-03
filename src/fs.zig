@@ -159,7 +159,7 @@ pub const DioWrite = union(enum) {
 
                             var sqe = std.mem.zeroes(linux.io_uring_sqe);
                             sqe.prep_write_fixed(s.fd, &iovec, io_offset, 0);
-                            s.io_id[io_idx] = ctx.queue_io(true, sqe);
+                            s.io_id[io_idx] = ctx.queue_polled_io(sqe);
                             s.io_size[io_idx] = io_size;
                             s.io_is_running[io_idx] = true;
                         }
@@ -333,7 +333,7 @@ pub const DioRead = union(enum) {
 
                             var sqe = std.mem.zeroes(linux.io_uring_sqe);
                             sqe.prep_read_fixed(s.fd, &iovec, io_offset, 0);
-                            s.io_id[io_idx] = ctx.queue_io(true, sqe);
+                            s.io_id[io_idx] = ctx.queue_polled_io(sqe);
                             s.io_size[io_idx] = io_size;
                             s.io_is_running[io_idx] = true;
                         }
@@ -419,7 +419,7 @@ pub const Mkdir = struct {
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
             sqe.prep_mkdirat(&sqe, linux.AT.FDCWD, self.path, self.mode);
-            self.io_id = ctx.queue_io(false, sqe);
+            self.io_id = ctx.queue_io(sqe);
             return .pending;
         }
     }
@@ -488,7 +488,7 @@ pub const UnlinkAt = struct {
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
             sqe.prep_unlinkat(linux.AT.FDCWD, self.path, self.flags);
-            self.io_id = ctx.queue_io(false, sqe);
+            self.io_id = ctx.queue_io(sqe);
             return .pending;
         }
     }
@@ -528,7 +528,7 @@ pub const Write = struct {
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
             sqe.prep_write(&sqe, self.fd, self.buf, self.offset);
-            self.io_id = ctx.queue_io(false, sqe);
+            self.io_id = ctx.queue_io(sqe);
             return .pending;
         }
     }
@@ -568,7 +568,7 @@ pub const Read = struct {
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
             sqe.prep_read(&sqe, self.fd, self.buf, self.offset);
-            self.io_id = ctx.queue_io(false, sqe);
+            self.io_id = ctx.queue_io(sqe);
             return .pending;
         }
     }
@@ -609,7 +609,7 @@ pub const Open = struct {
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
             sqe.prep_openat(linux.AT.FDCWD, self.path, self.flags, self.mode);
-            self.io_id = ctx.queue_io(false, sqe);
+            self.io_id = ctx.queue_io(sqe);
             return .pending;
         }
     }
@@ -641,7 +641,7 @@ pub const Close = struct {
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
             sqe.prep_close(self.fd);
-            self.io_id = ctx.queue_io(false, sqe);
+            self.io_id = ctx.queue_io(sqe);
             return .pending;
         }
     }
@@ -686,7 +686,7 @@ pub const FAllocate = struct {
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
             sqe.prep_fallocate(self.fd, self.mode, self.offset, self.size);
-            self.io_id = ctx.queue_io(false, sqe);
+            self.io_id = ctx.queue_io(sqe);
             return .pending;
         }
     }

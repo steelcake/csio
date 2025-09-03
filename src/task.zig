@@ -45,7 +45,20 @@ pub const Context = struct {
         }
     }
 
-    pub fn queue_io(self: *const Context, polled: bool, io: linux.io_uring_sqe) u64 {
+    pub fn notify_self(self: *const Context) void {
+        _ = self.to_notify.insert(self.task_id, {}) catch unreachable;
+    }
+
+    /// For queueing direct_io read/write only
+    pub fn queue_polled_io(self:* const Context, io: linux.io_uring_sqe) u64 {
+        return self.queue_io_impl(true, io);
+    }
+
+    pub fn queue_io(self: *const Context, io: linux.io_uring_sqe) u64 {
+        return self.queue_io_impl(false, io);
+    }
+
+    fn queue_io_impl(self: *const Context, polled: bool, io: linux.io_uring_sqe) u64 {
         const entry = self.task_entry;
 
         std.debug.assert(entry.num_pending_io + entry.num_finished_io < MAX_IO_PER_TASK);
