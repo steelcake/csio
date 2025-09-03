@@ -5,6 +5,7 @@ const task = @import("./task.zig");
 const executor = @import("./executor.zig");
 
 pub const fs = @import("./fs.zig");
+pub const tcp = @import("./tcp.zig");
 pub const Executor = executor.Executor;
 pub const Task = task.Task;
 pub const Context = task.Context;
@@ -18,5 +19,6 @@ test {
     _ = slab;
     _ = slice_map;
     _ = fs;
+    _ = tcp;
     _ = queue;
 }

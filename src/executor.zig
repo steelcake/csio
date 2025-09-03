@@ -186,12 +186,14 @@ pub const IoUring = struct {
 
     pending_io: u32,
 
+    is_polled: bool,
+
     fn init(params: struct {
         entries: u16,
         max_io: u32,
         /// file descriptor of another ring, will be used to share background threads with the other ring if passed.
         wq_fd: ?linux.fd_t,
-        /// If this argument is true then this ring can only be used for writing/reading from sockets(napi) and files(direct_io)
+        /// If this argument is true then this ring can only be used for direct_io read/write
         polled_io: bool,
         /// Allocator to be used for allocating internal data structures, same allocator should be passed to the deinit method
         alloc: Allocator,
@@ -213,23 +215,40 @@ pub const IoUring = struct {
             .sq_thread_idle = 1000,
             .flags = flags,
         });
-        const ring = linux.IoUring.init_params(std.math.ceilPowerOfTwo(u16, params.entries) catch unreachable, &ring_params) catch {
+        var ring = linux.IoUring.init_params(std.math.ceilPowerOfTwo(u16, params.entries) catch unreachable, &ring_params) catch {
             return error.IoUringSetupFail;
         };
 
-        // Use a larger sizes so we don't run out of capacity easily.
+        if (!params.polled_io) {
+            var napi_params = std.mem.zeroInit(linux.io_uring_napi, .{
+                // this is the timeout for busy polling in microseconds so we are setting it to 1/10th of a second
+                .busy_poll_to = 1,
+                .prefer_busy_poll = 1,
+            });
+
+            ring.register_napi(&napi_params) catch {
+                return error.IoUringSetupFail;
+            };
+        }
+
         const io_queue = try Queue(linux.io_uring_sqe).init(params.max_io, params.alloc);
 
         return Self{
             .ring = ring,
             .io_queue = io_queue,
             .pending_io = 0,
+            .is_polled = params.polled_io,
         };
     }
 
     fn deinit(self: *Self, alloc: Allocator) void {
         std.debug.assert(self.pending_io == 0);
         std.debug.assert(self.io_queue.is_empty());
+
+        if (!self.is_polled) {
+            var napi_params = std.mem.zeroes(linux.io_uring_napi);
+            self.ring.unregister_napi(&napi_params) catch unreachable;
+        }
 
         self.ring.deinit();
         self.io_queue.deinit(alloc);
