@@ -22,7 +22,7 @@ pub fn main() !void {
     });
     defer exec.deinit(alloc);
 
-    var main_task = MainTask.init("testfile", 1 << 32);
+    var main_task = MainTask.init("testfile", 1 << 34);
     exec.run(main_task.task());
 }
 
@@ -253,7 +253,10 @@ const Read = struct {
 
                     if (r.offset == self.file_size and pending == 0) {
                         const now = Instant.now() catch unreachable;
-                        std.log.info("Finished reading in {}us", .{now.since(r.start_t) / 1000});
+                        const elapsed = @as(f64, @floatFromInt(now.since(r.start_t) / 1000)) / 1000000.0;
+                        std.log.info("Finished reading in {d:.3}secs", .{elapsed});
+                        const file_size_gb: f64 = @floatFromInt(self.file_size / (1 << 30));
+                        std.log.info("Bandwidth: {d:.3}GB/s", .{file_size_gb / elapsed});
                         self.state = .{ .close = .{ .io = fs.Close.init(r.fd), .start_t = now } };
                     } else {
                         return .pending;
@@ -372,7 +375,13 @@ const Write = struct {
 
                     if (s.offset == self.size and pending == 0) {
                         const now = Instant.now() catch unreachable;
-                        std.log.info("Finished writing in {}us", .{now.since(s.start_t) / 1000});
+                        const elapsed = @as(f64, @floatFromInt(now.since(s.start_t) / 1000)) / 1000000.0;
+                        std.log.info("Finished writing in {d:.3}secs", .{elapsed});
+                        const file_size_gb: f64 = @floatFromInt(self.size / (1 << 30));
+                        std.log.info("Bandwidth: {d:.3}GB/s", .{file_size_gb / elapsed});
+                        for (s.buffers) |b| {
+                            fs.free_dio_buffer(ctx, b);
+                        }
                         self.state = .finished;
                         return .ready;
                     }

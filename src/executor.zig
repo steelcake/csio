@@ -222,7 +222,7 @@ pub const IoUring = struct {
         if (!params.polled_io) {
             var napi_params = std.mem.zeroInit(linux.io_uring_napi, .{
                 // this is the timeout for busy polling in microseconds so we are setting it to 1/10th of a second
-                .busy_poll_to = 1,
+                .busy_poll_to = 100000,
                 .prefer_busy_poll = 1,
             });
 

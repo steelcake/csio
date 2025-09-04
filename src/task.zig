@@ -50,7 +50,7 @@ pub const Context = struct {
     }
 
     /// For queueing direct_io read/write only
-    pub fn queue_polled_io(self:* const Context, io: linux.io_uring_sqe) u64 {
+    pub fn queue_polled_io(self: *const Context, io: linux.io_uring_sqe) u64 {
         return self.queue_io_impl(true, io);
     }
 
