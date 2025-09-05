@@ -188,6 +188,8 @@ pub const IoUring = struct {
 
     is_polled: bool,
 
+    cq_capacity: u32,
+
     fn init(params: struct {
         entries: u16,
         max_io: u32,
@@ -233,11 +235,14 @@ pub const IoUring = struct {
 
         const io_queue = try Queue(linux.io_uring_sqe).init(params.max_io, params.alloc);
 
+        std.debug.assert(ring_params.cq_entries >= params.entries);
+
         return Self{
             .ring = ring,
             .io_queue = io_queue,
             .pending_io = 0,
             .is_polled = params.polled_io,
+            .cq_capacity = ring_params.cq_entries,
         };
     }
 
@@ -294,7 +299,8 @@ pub const IoUring = struct {
     }
 
     fn sync_sq(self: *Self) void {
-        while (self.io_queue.len > 0) {
+        // never let more than cq_capacity IO be pending in the io_uring so it is not possible to have cq_ring overflow.
+        while (self.io_queue.len > 0 and self.pending_io < self.cq_capacity) {
             const sqe_ptr = self.ring.get_sqe() catch break;
             self.pending_io += 1;
             const sqe = self.io_queue.pop() orelse unreachable;
