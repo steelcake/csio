@@ -11,6 +11,7 @@ pub const Task = task.Task;
 pub const Context = task.Context;
 pub const Poll = task.Poll;
 pub const Result = task.Result;
+pub const Fd = task.Fd;
 pub const MAX_IO_PER_TASK = task.MAX_IO_PER_TASK;
 
 test {

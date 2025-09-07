@@ -50,6 +50,11 @@ pub fn Slab(comptime T: type) type {
             return self.n_occupied == 0;
         }
 
+        pub fn key_to_index(key: u64) u32 {
+            const k: Key = @bitCast(key);
+            return k.index;
+        }
+
         pub fn insert(self: *Self, val: T) error{OutOfCapacity}!u64 {
             const key_idx = self.first_free_entry;
             if (key_idx == self.entries.len) {

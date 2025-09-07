@@ -31,6 +31,8 @@ pub const Context = struct {
     // task_id -> void
     to_notify: *SliceMap(u64, void),
 
+    fixed_fd: []linux.fd_t,
+
     preempt_duration_ns: u64,
     io_alloc: *IoAlloc,
 
@@ -91,6 +93,50 @@ pub const Context = struct {
 
         return null;
     }
+
+    pub fn alloc_io_buf(self: *const Context, size: u32) []u8 {
+        return self.io_alloc.alloc(size) catch unreachable;
+    }
+
+    pub fn free_io_buf(self: *const Context, buf: []u8) void {
+        self.io_alloc.free(@alignCast(buf));
+    }
+
+    pub fn register_fd(self: *const Context, fd: linux.fd_t) u32 {
+        std.debug.assert(fd > -1);
+
+        for (self.fixed_fd) |f| {
+            if (f == fd) {
+                unreachable;
+            }
+        }
+
+        const idx = for (self.fixed_fd, 0..) |f, idx| {
+            if (f == -1) {
+                self.fixed_fd[idx] = fd;
+                break @as(u32, @intCast(idx));
+            }
+        } else unreachable;
+
+        self.ring.ring.register_files_update(idx, &.{fd}) catch unreachable;
+        self.polled_ring.ring.register_files_update(idx, &.{fd}) catch unreachable;
+
+        return idx;
+    }
+
+    pub fn unregister_fd(self: *const Context, idx: u32) linux.fd_t {
+        const fd = self.fixed_fd[idx];
+        std.debug.assert(fd > -1);
+        self.ring.ring.register_files_update(idx, &.{-1}) catch unreachable;
+        self.polled_ring.ring.register_files_update(idx, &.{-1}) catch unreachable;
+        self.fixed_fd[idx] = -1;
+        return fd;
+    }
+};
+
+pub const Fd = union(enum) {
+    fixed: u32,
+    fd: linux.fd_t,
 };
 
 pub fn Result(comptime T: type, comptime E: type) type {

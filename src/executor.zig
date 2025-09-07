@@ -28,6 +28,8 @@ pub const Executor = struct {
     // task_id -> void
     to_notify: SliceMap(u64, void),
 
+    fixed_fd: []linux.fd_t,
+
     // Allocator for direct_io read/write
     io_alloc: IoAlloc,
 
@@ -39,7 +41,8 @@ pub const Executor = struct {
         max_num_tasks: u32 = 256,
         entries: u16 = 64,
         io_alloc_capacity: u32 = 1 << 28,
-        preempt_duration_ns: u64 = 10 * 1000 * 1000,
+        preempt_duration_ns: u64 = 3 * 1000 * 1000,
+        register_fd_capacity: u32 = 1024,
         wq_fd: ?linux.fd_t,
         alloc: Allocator,
     }) error{ OutOfMemory, IoUringSetupFail, RegisterBuffersFail }!Self {
@@ -50,6 +53,7 @@ pub const Executor = struct {
         const io_ring = try IoUring.init(.{
             .entries = params.entries,
             .max_io = max_io,
+            .register_fd_capacity = params.register_fd_capacity,
             .wq_fd = params.wq_fd,
             .polled_io = false,
             .alloc = params.alloc,
@@ -60,6 +64,7 @@ pub const Executor = struct {
         var polled_io_ring = try IoUring.init(.{
             .entries = params.entries,
             .max_io = max_io,
+            .register_fd_capacity = params.register_fd_capacity,
             .wq_fd = wq_fd,
             .polled_io = true,
             .alloc = params.alloc,
@@ -77,6 +82,10 @@ pub const Executor = struct {
         const io = try Slab(u64).init(max_io, params.alloc);
         const tasks = try Slab(TaskEntry).init(params.max_num_tasks, params.alloc);
         const to_notify = try SliceMap(u64, void).init(params.max_num_tasks, params.alloc);
+        const fixed_fd = try params.alloc.alloc(linux.fd_t, params.register_fd_capacity);
+        for (0..fixed_fd.len) |idx| {
+            fixed_fd[idx] = -1;
+        }
 
         return Self{
             .io_ring = io_ring,
@@ -87,6 +96,7 @@ pub const Executor = struct {
             .preempt_duration_ns = params.preempt_duration_ns,
             .wq_fd = wq_fd,
             .io_alloc = io_alloc,
+            .fixed_fd = fixed_fd,
         };
     }
 
@@ -98,6 +108,9 @@ pub const Executor = struct {
         std.debug.assert(self.tasks.is_empty());
         std.debug.assert(self.to_notify.is_empty());
         std.debug.assert(self.io.is_empty());
+        for (self.fixed_fd) |fd| {
+            std.debug.assert(fd == -1);
+        }
 
         self.io_ring.deinit(alloc);
         self.polled_io_ring.deinit(alloc);
@@ -105,6 +118,7 @@ pub const Executor = struct {
         self.tasks.deinit(alloc);
         self.to_notify.deinit(alloc);
         self.io_alloc.deinit(alloc);
+        alloc.free(self.fixed_fd);
     }
 
     pub fn run(self: *Self, main_task: Task) void {
@@ -145,6 +159,7 @@ pub const Executor = struct {
                     .polled_ring = &self.polled_io_ring,
                     .task_entry = entry,
                     .io_alloc = &self.io_alloc,
+                    .fixed_fd = self.fixed_fd,
                 });
                 switch (poll_res) {
                     .ready => {
@@ -193,6 +208,7 @@ pub const IoUring = struct {
     fn init(params: struct {
         entries: u16,
         max_io: u32,
+        register_fd_capacity: u32,
         /// file descriptor of another ring, will be used to share background threads with the other ring if passed.
         wq_fd: ?linux.fd_t,
         /// If this argument is true then this ring can only be used for direct_io read/write
@@ -218,6 +234,10 @@ pub const IoUring = struct {
             .flags = flags,
         });
         var ring = linux.IoUring.init_params(std.math.ceilPowerOfTwo(u16, params.entries) catch unreachable, &ring_params) catch {
+            return error.IoUringSetupFail;
+        };
+
+        ring.register_files_sparse(params.register_fd_capacity) catch {
             return error.IoUringSetupFail;
         };
 

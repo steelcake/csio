@@ -22,7 +22,7 @@ pub fn main() !void {
     });
     defer exec.deinit(alloc);
 
-    var main_task = MainTask.init("testfile", 1 << 34);
+    var main_task = MainTask.init("testfile", 1 << 32);
     exec.run(main_task.task());
 }
 
@@ -32,10 +32,9 @@ const MainTask = struct {
     const State = union(enum) {
         start,
         setup_file: SetupFile,
-        write: struct { io: Write, fd: linux.fd_t },
-        close_file: fs.Close,
+        write: Write,
         read: Read,
-        delete_file: fs.RemoveFile,
+        delete: fs.RemoveFile,
         finished,
     };
 
@@ -61,26 +60,16 @@ const MainTask = struct {
                 },
                 .setup_file => |*sf| {
                     switch (sf.poll(ctx)) {
-                        .ready => |fd| {
+                        .ready => {
                             self.state = .{
-                                .write = .{ .io = Write.init(fd, self.file_size), .fd = fd },
+                                .write = Write.init(self.path, self.file_size),
                             };
                         },
                         .pending => return .pending,
                     }
                 },
                 .write => |*w| {
-                    switch (w.io.poll(ctx)) {
-                        .ready => {
-                            self.state = .{
-                                .close_file = fs.Close.init(w.fd),
-                            };
-                        },
-                        .pending => return .pending,
-                    }
-                },
-                .close_file => |*cf| {
-                    switch (cf.poll(ctx)) {
+                    switch (w.poll(ctx)) {
                         .ready => {
                             self.state = .{ .read = Read.init(self.path, self.file_size) };
                         },
@@ -90,12 +79,12 @@ const MainTask = struct {
                 .read => |*r| {
                     switch (r.poll(ctx)) {
                         .ready => {
-                            self.state = .{ .delete_file = fs.RemoveFile.init(self.path) };
+                            self.state = .{ .delete = fs.RemoveFile.init(self.path) };
                         },
                         .pending => return .pending,
                     }
                 },
-                .delete_file => |*df| {
+                .delete => |*df| {
                     switch (df.poll(ctx)) {
                         .ready => {
                             self.state = .finished;
@@ -122,19 +111,20 @@ const MainTask = struct {
     }
 };
 
-const NUM_IO = 64;
-const IO_SIZE = 1 << 19;
-
 const Read = struct {
     const Self = @This();
+
+    const CONCURRENCY = 8;
+    const IO_SIZE = 1 << 19;
 
     const State = union(enum) {
         start,
         open: struct { start_t: Instant, io: fs.Open },
         read: struct {
-            fd: linux.fd_t,
-            io: [NUM_IO]?fs.DioRead,
-            io_offset: [NUM_IO]u64,
+            fd_idx: u32,
+            buffers: [CONCURRENCY][]u8,
+            io: [CONCURRENCY]?fs.DirectRead,
+            io_offset: [CONCURRENCY]u64,
             offset: u64,
             start_t: Instant,
         },
@@ -175,36 +165,44 @@ const Read = struct {
                 .open => |*o| {
                     switch (o.io.poll(ctx)) {
                         .ready => |res| {
-                            switch (res) {
-                                .ok => |fd| {
-                                    const now = Instant.now() catch unreachable;
+                            const fd = switch (res) {
+                                .ok => |fd| fd,
+                                .err => unreachable,
+                            };
 
-                                    std.log.info("It took {}us to open file for reading.", .{now.since(o.start_t) / 1000});
+                            const now = Instant.now() catch unreachable;
 
-                                    var io: [NUM_IO]?fs.DioRead = undefined;
-                                    for (0..NUM_IO) |idx| {
-                                        io[idx] = null;
-                                    }
+                            std.log.info("It took {}us to open file for reading.", .{now.since(o.start_t) / 1000});
 
-                                    self.state = .{
-                                        .read = .{
-                                            .fd = fd,
-                                            .io = io,
-                                            .io_offset = undefined,
-                                            .offset = 0,
-                                            .start_t = now,
-                                        },
-                                    };
-                                },
-                                .err => |e| std.debug.panic("failed to open file for reading: {}", .{e}),
+                            const fd_idx = ctx.register_fd(fd);
+
+                            var buffers: [CONCURRENCY][]u8 = undefined;
+                            for (0..CONCURRENCY) |idx| {
+                                buffers[idx] = ctx.alloc_io_buf(IO_SIZE);
                             }
+
+                            var io: [CONCURRENCY]?fs.DirectRead = undefined;
+                            for (0..CONCURRENCY) |idx| {
+                                io[idx] = null;
+                            }
+
+                            self.state = .{
+                                .read = .{
+                                    .fd_idx = fd_idx,
+                                    .buffers = buffers,
+                                    .io = io,
+                                    .io_offset = undefined,
+                                    .offset = 0,
+                                    .start_t = now,
+                                },
+                            };
                         },
                         .pending => return .pending,
                     }
                 },
                 .read => |*r| {
                     var pending: u32 = 0;
-                    io: for (0..NUM_IO) |idx| {
+                    io: for (0..CONCURRENCY) |idx| {
                         if (ctx.yield_if_needed()) {
                             return .pending;
                         }
@@ -214,27 +212,23 @@ const Read = struct {
                                 switch (io.poll(ctx)) {
                                     .ready => |res| {
                                         switch (res) {
-                                            .ok => |buf| {
-                                                defer fs.free_dio_buffer(ctx, buf);
-
-                                                std.debug.assert(buf.data().len == IO_SIZE);
-
-                                                const buf_typed: []const u64 = @ptrCast(@alignCast(buf.data()));
-
-                                                const io_offset = r.io_offset[idx];
-                                                var mismatch: bool = false;
-                                                for (buf_typed, 0..) |x, i| {
-                                                    mismatch |= x != io_offset +% i;
+                                            .ok => |n_read| {
+                                                if (n_read != IO_SIZE) {
+                                                    std.debug.panic("unexpected number of bytes read. Expected {}, Read{}", .{ IO_SIZE, n_read });
                                                 }
-                                                std.debug.assert(!mismatch);
-
-                                                io_ptr.* = null;
                                             },
-                                            .err => |e| switch (e) {
-                                                .short_read => unreachable,
-                                                .os => |os_e| std.debug.panic("failed read: {}", .{os_e}),
-                                            },
+                                            .err => |e| std.debug.panic("failed read: {}", .{e}),
                                         }
+
+                                        const buf_typed: []const u64 = @ptrCast(@alignCast(r.buffers[idx]));
+                                        const io_offset = r.io_offset[idx];
+                                        var mismatch: bool = false;
+                                        for (buf_typed, 0..) |x, i| {
+                                            mismatch |= x != io_offset +% i;
+                                        }
+                                        std.debug.assert(!mismatch);
+
+                                        io_ptr.* = null;
                                     },
                                     .pending => {
                                         pending += 1;
@@ -244,7 +238,7 @@ const Read = struct {
                             } else if (self.file_size == r.offset) {
                                 continue :io;
                             } else {
-                                io_ptr.* = fs.DioRead.init(r.fd, r.offset, IO_SIZE);
+                                io_ptr.* = fs.DirectRead.init(.{ .fixed = r.fd_idx }, r.buffers[idx], r.offset);
                                 r.io_offset[idx] = r.offset;
                                 r.offset += IO_SIZE;
                             }
@@ -257,7 +251,15 @@ const Read = struct {
                         std.log.info("Finished reading in {d:.3}secs", .{elapsed});
                         const file_size_gb: f64 = @floatFromInt(self.file_size / (1 << 30));
                         std.log.info("Bandwidth: {d:.3}GB/s", .{file_size_gb / elapsed});
-                        self.state = .{ .close = .{ .io = fs.Close.init(r.fd), .start_t = now } };
+                        const num_io: f64 = @floatFromInt(self.file_size / IO_SIZE);
+                        std.log.info("IOPS: {d:.3}", .{num_io / elapsed});
+
+                        for (r.buffers) |b| {
+                            ctx.free_io_buf(b);
+                        }
+
+                        const fd = ctx.unregister_fd(r.fd_idx);
+                        self.state = .{ .close = .{ .io = fs.Close.init(fd), .start_t = now } };
                     } else {
                         return .pending;
                     }
@@ -282,25 +284,31 @@ const Read = struct {
 const Write = struct {
     const Self = @This();
 
+    const CONCURRENCY = 8;
+    const IO_SIZE = 1 << 19;
+
     const State = union(enum) {
         start,
-        running: struct {
-            buffers: [NUM_IO]fs.DioBuf,
-            io: [NUM_IO]?fs.DioWrite,
+        open: struct { io: fs.Open, start_t: Instant },
+        write: struct {
+            fd_idx: u32,
+            buffers: [CONCURRENCY][]u8,
+            io: [CONCURRENCY]?fs.DirectWrite,
             offset: u64,
             start_t: Instant,
         },
+        close: struct { io: fs.Close, start_t: Instant },
         finished,
     };
 
-    fd: linux.fd_t,
-    size: u64,
+    path: [:0]const u8,
+    file_size: u64,
     state: State,
 
-    fn init(fd: linux.fd_t, size: u64) Write {
+    fn init(path: [:0]const u8, file_size: u64) Write {
         return .{
-            .fd = fd,
-            .size = size,
+            .path = path,
+            .file_size = file_size,
             .state = .start,
         };
     }
@@ -309,29 +317,62 @@ const Write = struct {
         while (true) {
             switch (self.state) {
                 .start => {
-                    var buffers: [NUM_IO]fs.DioBuf = undefined;
-                    for (0..NUM_IO) |idx| {
-                        const buf = fs.alloc_dio_buffer(ctx, IO_SIZE);
-                        buffers[idx] = buf;
-                    }
-
-                    var io: [NUM_IO]?fs.DioWrite = undefined;
-                    for (0..NUM_IO) |idx| {
-                        io[idx] = null;
-                    }
-
+                    const now = Instant.now() catch unreachable;
                     self.state = .{
-                        .running = .{
-                            .buffers = buffers,
-                            .io = io,
-                            .offset = 0,
-                            .start_t = Instant.now() catch unreachable,
+                        .open = .{
+                            .io = fs.Open.init(
+                                self.path,
+                                linux.O{
+                                    .ACCMODE = .RDWR,
+                                    .DSYNC = true,
+                                    .DIRECT = true,
+                                },
+                                0,
+                            ),
+                            .start_t = now,
                         },
                     };
                 },
-                .running => |*s| {
+                .open => |*o| {
+                    switch (o.io.poll(ctx)) {
+                        .ready => |res| {
+                            const fd = switch (res) {
+                                .ok => |fd| fd,
+                                .err => unreachable,
+                            };
+
+                            const now = Instant.now() catch unreachable;
+
+                            std.log.info("It took {}us to open file for writing", .{now.since(o.start_t) / 1000});
+
+                            const fd_idx = ctx.register_fd(fd);
+
+                            var buffers: [CONCURRENCY][]u8 = undefined;
+                            for (0..CONCURRENCY) |idx| {
+                                buffers[idx] = ctx.alloc_io_buf(IO_SIZE);
+                            }
+
+                            var io: [CONCURRENCY]?fs.DirectWrite = undefined;
+                            for (0..CONCURRENCY) |idx| {
+                                io[idx] = null;
+                            }
+
+                            self.state = .{
+                                .write = .{
+                                    .fd_idx = fd_idx,
+                                    .buffers = buffers,
+                                    .io = io,
+                                    .offset = 0,
+                                    .start_t = now,
+                                },
+                            };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .write => |*s| {
                     var pending: u32 = 0;
-                    io: for (0..NUM_IO) |idx| {
+                    io: for (0..CONCURRENCY) |idx| {
                         if (ctx.yield_if_needed()) {
                             return .pending;
                         }
@@ -341,11 +382,12 @@ const Write = struct {
                                 switch (io.poll(ctx)) {
                                     .ready => |res| {
                                         switch (res) {
-                                            .ok => {},
-                                            .err => |e| switch (e) {
-                                                .short_write => unreachable,
-                                                .os => |os_e| std.debug.panic("failed write: {}", .{os_e}),
+                                            .ok => |n_wrote| {
+                                                if (n_wrote != IO_SIZE) {
+                                                    std.debug.panic("unexpected number of bytes written. Expected {}, Wrote {}", .{ IO_SIZE, n_wrote });
+                                                }
                                             },
+                                            .err => |e| std.debug.panic("failed write: {}", .{e}),
                                         }
 
                                         io_ptr.* = null;
@@ -355,38 +397,53 @@ const Write = struct {
                                         continue :io;
                                     },
                                 }
-                            } else if (self.size == s.offset) {
+                            } else if (self.file_size == s.offset) {
                                 continue :io;
                             } else {
                                 const buf = s.buffers[idx];
-                                const buf_data = buf.data();
-                                std.debug.assert(buf_data.len == IO_SIZE);
+                                std.debug.assert(buf.len == IO_SIZE);
 
-                                const buf_data_out: []u64 = @ptrCast(@alignCast(buf_data));
-                                for (0..buf_data_out.len) |i| {
-                                    buf_data_out.ptr[i] = i +% s.offset;
+                                const buf_data: []u64 = @ptrCast(@alignCast(buf));
+                                for (0..buf_data.len) |i| {
+                                    buf_data.ptr[i] = i +% s.offset;
                                 }
 
-                                io_ptr.* = fs.DioWrite.init(self.fd, buf, s.offset);
+                                io_ptr.* = fs.DirectWrite.init(.{ .fixed = s.fd_idx }, buf, s.offset);
                                 s.offset += IO_SIZE;
                             }
                         }
                     }
 
-                    if (s.offset == self.size and pending == 0) {
+                    if (s.offset == self.file_size and pending == 0) {
                         const now = Instant.now() catch unreachable;
                         const elapsed = @as(f64, @floatFromInt(now.since(s.start_t) / 1000)) / 1000000.0;
                         std.log.info("Finished writing in {d:.3}secs", .{elapsed});
-                        const file_size_gb: f64 = @floatFromInt(self.size / (1 << 30));
+                        const file_size_gb: f64 = @floatFromInt(self.file_size / (1 << 30));
                         std.log.info("Bandwidth: {d:.3}GB/s", .{file_size_gb / elapsed});
+                        const num_io: f64 = @floatFromInt(self.file_size / IO_SIZE);
+                        std.log.info("IOPS: {d:.3}", .{num_io / elapsed});
+
                         for (s.buffers) |b| {
-                            fs.free_dio_buffer(ctx, b);
+                            ctx.free_io_buf(b);
                         }
-                        self.state = .finished;
+
+                        const fd = ctx.unregister_fd(s.fd_idx);
+                        self.state = .{ .close = .{ .start_t = now, .io = fs.Close.init(fd) } };
                         return .ready;
                     }
 
                     return .pending;
+                },
+                .close => |*c| {
+                    switch (c.io.poll(ctx)) {
+                        .ready => {
+                            const now = Instant.now() catch unreachable;
+                            std.log.info("Finished closing file in {}us", .{now.since(c.start_t) / 1000});
+                            self.state = .finished;
+                            return .ready;
+                        },
+                        .pending => return .pending,
+                    }
                 },
                 .finished => unreachable,
             }
@@ -404,7 +461,9 @@ const SetupFile = struct {
         // create and open file
         open: struct { start_t: Instant, io: fs.Open },
         // reserve space for file
-        fallocate: struct { start_t: Instant, fd: linux.fd_t, io: fs.FAllocate },
+        fallocate: struct { start_t: Instant, fd_idx: u32, io: fs.FAllocate },
+        // close the file
+        close: struct { start_t: Instant, io: fs.Close },
         finished,
     };
 
@@ -420,7 +479,7 @@ const SetupFile = struct {
         };
     }
 
-    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(linux.fd_t) {
+    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(void) {
         while (true) {
             switch (self.state) {
                 .start => {
@@ -451,8 +510,6 @@ const SetupFile = struct {
                                             .ACCMODE = .RDWR,
                                             .CREAT = true,
                                             .EXCL = true,
-                                            .DSYNC = true,
-                                            .DIRECT = true,
                                         },
                                         0o666,
                                     ),
@@ -475,10 +532,12 @@ const SetupFile = struct {
 
                             std.log.info("It took {}us to create new file", .{now.since(s.start_t) / 1000});
 
+                            const fd_idx = ctx.register_fd(fd);
+
                             self.state = .{
                                 .fallocate = .{
-                                    .fd = fd,
-                                    .io = fs.FAllocate.init(fd, 0, 0, self.size),
+                                    .fd_idx = fd_idx,
+                                    .io = fs.FAllocate.init(.{ .fixed = fd_idx }, 0, 0, self.size),
                                     .start_t = now,
                                 },
                             };
@@ -497,9 +556,19 @@ const SetupFile = struct {
                             const now = Instant.now() catch unreachable;
                             std.log.info("It took {}us to fallocate", .{now.since(s.start_t) / 1000});
 
-                            const fd = s.fd;
+                            const fd = ctx.unregister_fd(s.fd_idx);
+                            self.state = .{ .close = .{ .start_t = now, .io = fs.Close.init(fd) } };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .close => |*c| {
+                    switch (c.io.poll(ctx)) {
+                        .ready => {
+                            const now = Instant.now() catch unreachable;
+                            std.log.info("Finished closing file in {}us", .{now.since(c.start_t) / 1000});
                             self.state = .finished;
-                            return .{ .ready = fd };
+                            return .ready;
                         },
                         .pending => return .pending,
                     }

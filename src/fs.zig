@@ -5,25 +5,7 @@ const task_mod = @import("./task.zig");
 const Context = task_mod.Context;
 const Poll = task_mod.Poll;
 const Result = task_mod.Result;
-const IoAlloc = @import("io_alloc.zig").IoAlloc;
-
-/// Allocate a buffer suitable for doing direct_io
-///
-/// Intended to be used for `DioWrite`
-///
-/// Caller should release the memory by calling `free_dio_buffer` after their use is done.
-pub fn alloc_dio_buffer(ctx: *const Context, size: u32) DioBuf {
-    return DioBuf{
-        .alloc_buf = ctx.io_alloc.alloc(size) catch unreachable,
-        .data_start = 0,
-        .data_end = size,
-    };
-}
-
-/// Should be used to free `DioBuf` allocated to be used with `DioWrite` or `DioBuf` returned from `DioRead`
-pub fn free_dio_buffer(ctx: *const Context, buf: DioBuf) void {
-    ctx.io_alloc.free(buf.alloc_buf);
-}
+const Fd = task_mod.Fd;
 
 pub fn align_forward(addr: usize, alignment: usize) usize {
     return (addr +% alignment -% 1) & ~(alignment -% 1);
@@ -32,357 +14,6 @@ pub fn align_forward(addr: usize, alignment: usize) usize {
 pub fn align_backward(addr: usize, alignment: usize) usize {
     return addr & ~(alignment - 1);
 }
-
-pub const DioWrite = union(enum) {
-    pub const CONCURRENCY = 4;
-    pub const MAX_IO_SIZE = 1 << 19;
-
-    const Self = @This();
-
-    pub const Error = union(enum) {
-        short_write,
-        os: linux.E,
-    };
-
-    start: struct {
-        fd: linux.fd_t,
-        offset: u64,
-        buf: DioBuf,
-    },
-    write: struct {
-        fd: linux.fd_t,
-        file_offset: u64,
-        // offset into io_buf, this is modified as write ops are started
-        offset: u32,
-        io_buf: DioBuf,
-        io_id: [CONCURRENCY]u64,
-        io_size: [CONCURRENCY]u32,
-        io_is_running: [CONCURRENCY]bool,
-    },
-    fail: struct {
-        e: Error,
-        io_id: [CONCURRENCY]u64,
-        io_is_running: [CONCURRENCY]bool,
-    },
-    finished: void,
-
-    pub fn init(fd: linux.fd_t, buf: DioBuf, offset: u64) Self {
-        std.debug.assert(buf.data_start % IoAlloc.ALIGN == 0);
-        std.debug.assert(buf.data_end % IoAlloc.ALIGN == 0);
-
-        return Self{
-            .start = .{
-                .fd = fd,
-                .buf = buf,
-                .offset = offset,
-            },
-        };
-    }
-
-    pub fn poll(self: *Self, ctx: *const Context) Poll(Result(void, Error)) {
-        poll: while (true) {
-            switch (self.*) {
-                .start => |*s| {
-                    if (s.buf.size() == 0) {
-                        self.* = .finished;
-                        return .{ .ready = .{ .ok = {} } };
-                    }
-
-                    var io_is_running: [CONCURRENCY]bool = undefined;
-                    for (0..CONCURRENCY) |io_idx| {
-                        io_is_running[io_idx] = false;
-                    }
-
-                    self.* = .{
-                        .write = .{
-                            .fd = s.fd,
-                            .offset = 0,
-                            .io_buf = s.buf,
-                            .io_id = undefined,
-                            .io_size = undefined,
-                            .io_is_running = io_is_running,
-                            .file_offset = s.offset,
-                        },
-                    };
-                },
-                .write => |*s| {
-                    // check if any io is finished and count pending io
-                    var num_pending: u8 = 0;
-                    for (0..CONCURRENCY) |io_idx| {
-                        if (s.io_is_running[io_idx]) {
-                            if (ctx.remove_io_result(s.io_id[io_idx])) |cqe| {
-                                s.io_is_running[io_idx] = false;
-                                switch (cqe.err()) {
-                                    .SUCCESS => {
-                                        const n_wrote: u32 = @intCast(cqe.res);
-                                        std.debug.assert(n_wrote <= s.io_size[io_idx]);
-                                        if (n_wrote < s.io_size[io_idx]) {
-                                            self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = .{ .short_write = {} } } };
-                                            continue :poll;
-                                        }
-                                    },
-                                    else => |e| {
-                                        self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = .{ .os = e } } };
-                                        continue :poll;
-                                    },
-                                }
-                            } else {
-                                num_pending += 1;
-                            }
-                        }
-                    }
-
-                    if (num_pending == 0 and s.io_buf.size() == s.offset) {
-                        self.* = .finished;
-                        return .{ .ready = .{ .ok = {} } };
-                    }
-
-                    // queue new io
-                    for (0..CONCURRENCY) |io_idx| {
-                        if (s.io_buf.size() == s.offset) {
-                            break;
-                        }
-
-                        if (!s.io_is_running[io_idx]) {
-                            const io_buf_ptr: [*]u8 = s.io_buf.data()[s.offset..].ptr;
-
-                            const io_offset: u64 = s.file_offset + s.offset;
-
-                            const io_size: u32 = @min(MAX_IO_SIZE, s.io_buf.size() - s.offset);
-                            s.offset += io_size;
-
-                            // Doesn't have to be mutable but stdlib API for prep_write_fixed is wrong
-                            var iovec = std.posix.iovec{
-                                .base = io_buf_ptr,
-                                .len = io_size,
-                            };
-
-                            var sqe = std.mem.zeroes(linux.io_uring_sqe);
-                            sqe.prep_write_fixed(s.fd, &iovec, io_offset, 0);
-                            s.io_id[io_idx] = ctx.queue_polled_io(sqe);
-                            s.io_size[io_idx] = io_size;
-                            s.io_is_running[io_idx] = true;
-                        }
-                    }
-
-                    return .pending;
-                },
-                .fail => |*s| {
-                    // check if any io is finished and count pending io
-                    var num_pending: u8 = 0;
-                    for (0..CONCURRENCY) |io_idx| {
-                        if (s.io_is_running[io_idx]) {
-                            if (ctx.remove_io_result(s.io_id[io_idx])) |_| {
-                                s.io_is_running[io_idx] = false;
-                            } else {
-                                num_pending += 1;
-                            }
-                        }
-                    }
-
-                    if (num_pending == 0) {
-                        const e = s.e;
-                        self.* = .finished;
-                        return .{ .ready = .{ .err = e } };
-                    } else {
-                        return .pending;
-                    }
-                },
-                .finished => unreachable,
-            }
-        }
-    }
-};
-
-pub const DioRead = union(enum) {
-    const CONCURRENCY = 4;
-    const MAX_IO_SIZE = 1 << 19;
-
-    const Self = @This();
-
-    pub const Error = union(enum) {
-        short_read,
-        os: linux.E,
-    };
-
-    start: struct {
-        fd: linux.fd_t,
-        offset: u64,
-        size: u32,
-    },
-    read: struct {
-        fd: linux.fd_t,
-        offset: u64,
-        size: u32,
-        io_buf: DioBuf,
-        io_id: [CONCURRENCY]u64,
-        io_size: [CONCURRENCY]u32,
-        io_is_running: [CONCURRENCY]bool,
-    },
-    fail: struct {
-        e: Error,
-        io_id: [CONCURRENCY]u64,
-        io_is_running: [CONCURRENCY]bool,
-    },
-    finished: void,
-
-    pub fn init(fd: linux.fd_t, offset: u64, size: u32) Self {
-        return Self{
-            .start = .{
-                .fd = fd,
-                .offset = offset,
-                .size = size,
-            },
-        };
-    }
-
-    pub fn poll(self: *Self, ctx: *const Context) Poll(Result(DioBuf, Error)) {
-        poll: while (true) {
-            switch (self.*) {
-                .start => |*s| {
-                    if (s.size == 0) {
-                        self.* = .finished;
-                        return .{
-                            .ready = .{
-                                .ok = DioBuf{
-                                    .alloc_buf = &.{},
-                                    .data_start = 0,
-                                    .data_end = 0,
-                                },
-                            },
-                        };
-                    }
-
-                    const read_offset = align_backward(s.offset, IoAlloc.ALIGN);
-                    const read_size: u32 = @intCast(align_forward(s.size, IoAlloc.ALIGN) + (s.offset - read_offset));
-                    const buf = DioBuf{
-                        .alloc_buf = ctx.io_alloc.alloc(read_size) catch unreachable,
-                        .data_start = @intCast(s.offset - read_offset),
-                        .data_end = @intCast((s.offset - read_offset) + s.size),
-                    };
-
-                    var io_is_running: [CONCURRENCY]bool = undefined;
-                    for (0..CONCURRENCY) |io_idx| {
-                        io_is_running[io_idx] = false;
-                    }
-
-                    self.* = .{
-                        .read = .{
-                            .fd = s.fd,
-                            .offset = s.offset,
-                            .size = s.size,
-                            .io_buf = buf,
-                            .io_id = undefined,
-                            .io_size = undefined,
-                            .io_is_running = io_is_running,
-                        },
-                    };
-                },
-                .read => |*s| {
-                    // check if any io is finished and count pending io
-                    var num_pending: u8 = 0;
-                    for (0..CONCURRENCY) |io_idx| {
-                        if (s.io_is_running[io_idx]) {
-                            if (ctx.remove_io_result(s.io_id[io_idx])) |cqe| {
-                                s.io_is_running[io_idx] = false;
-                                switch (cqe.err()) {
-                                    .SUCCESS => {
-                                        const n_read: u32 = @intCast(cqe.res);
-                                        std.debug.assert(n_read <= s.io_size[io_idx]);
-                                        if (n_read < s.io_size[io_idx]) {
-                                            self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = .{ .short_read = {} } } };
-                                            continue :poll;
-                                        }
-                                    },
-                                    else => |e| {
-                                        self.* = .{ .fail = .{ .io_is_running = s.io_is_running, .io_id = s.io_id, .e = .{ .os = e } } };
-                                        continue :poll;
-                                    },
-                                }
-                            } else {
-                                num_pending += 1;
-                            }
-                        }
-                    }
-
-                    if (num_pending == 0 and s.size == 0) {
-                        const io_buf = s.io_buf;
-                        self.* = .finished;
-                        return .{ .ready = .{ .ok = io_buf } };
-                    }
-
-                    // queue new io
-                    for (0..CONCURRENCY) |io_idx| {
-                        if (s.size == 0) {
-                            break;
-                        }
-
-                        if (!s.io_is_running[io_idx]) {
-                            const io_buf_ptr: [*]u8 = @ptrFromInt(@intFromPtr(s.io_buf.alloc_buf.ptr) + s.io_buf.alloc_buf.len - s.size);
-
-                            const io_offset = s.offset;
-                            const io_size = @min(MAX_IO_SIZE, s.size);
-                            s.offset += io_size;
-                            s.size -= io_size;
-
-                            // Doesn't have to be mutable but stdlib API for prep_read_fixed is wrong
-                            var iovec = std.posix.iovec{
-                                .base = io_buf_ptr,
-                                .len = io_size,
-                            };
-
-                            var sqe = std.mem.zeroes(linux.io_uring_sqe);
-                            sqe.prep_read_fixed(s.fd, &iovec, io_offset, 0);
-                            s.io_id[io_idx] = ctx.queue_polled_io(sqe);
-                            s.io_size[io_idx] = io_size;
-                            s.io_is_running[io_idx] = true;
-                        }
-                    }
-
-                    return .pending;
-                },
-                .fail => |*s| {
-                    // check if any io is finished and count pending io
-                    var num_pending: u8 = 0;
-                    for (0..CONCURRENCY) |io_idx| {
-                        if (s.io_is_running[io_idx]) {
-                            if (ctx.remove_io_result(s.io_id[io_idx])) |_| {
-                                s.io_is_running[io_idx] = false;
-                            } else {
-                                num_pending += 1;
-                            }
-                        }
-                    }
-
-                    if (num_pending == 0) {
-                        const e = s.e;
-                        self.* = .finished;
-                        return .{ .ready = .{ .err = e } };
-                    } else {
-                        return .pending;
-                    }
-                },
-                .finished => unreachable,
-            }
-        }
-    }
-};
-
-pub const DioBuf = struct {
-    alloc_buf: []align(IoAlloc.ALIGN) u8,
-
-    // Requested data
-    data_start: u32,
-    data_end: u32,
-
-    pub fn data(self: *const DioBuf) []u8 {
-        return self.alloc_buf[self.data_start..self.data_end];
-    }
-
-    pub fn size(self: *const DioBuf) u32 {
-        return self.data_end - self.data_start;
-    }
-};
 
 pub const Mkdir = struct {
     path: [:0]const u8,
@@ -494,21 +125,44 @@ pub const UnlinkAt = struct {
     }
 };
 
+pub const DirectWrite = struct {
+    inner: Write,
+
+    pub fn init(fd: Fd, buf: []const u8, offset: u64) DirectWrite {
+        return .{
+            .inner = .{
+                .fd = fd,
+                .buf = buf,
+                .offset = offset,
+                .io_id = null,
+                .finished = false,
+                .direct = true,
+            },
+        };
+    }
+
+    pub fn poll(self: *DirectWrite, ctx: *const Context) Poll(Result(usize, linux.E)) {
+        return self.inner.poll(ctx);
+    }
+};
+
 pub const Write = struct {
-    fd: linux.fd_t,
+    fd: Fd,
     offset: u64,
     buf: []const u8,
+    direct: bool,
 
     io_id: ?u64,
     finished: bool,
 
-    pub fn init(fd: linux.fd_t, buf: []const u8, offset: u64) Write {
+    pub fn init(fd: Fd, buf: []const u8, offset: u64) Write {
         return .{
             .fd = fd,
             .buf = buf,
             .offset = offset,
             .io_id = null,
             .finished = false,
+            .direct = false,
         };
     }
 
@@ -526,29 +180,69 @@ pub const Write = struct {
                 return .pending;
             }
         } else {
+            if (self.buf.len == 0) {
+                self.finished = true;
+                return .{ .ready = .{ .ok = 0 } };
+            }
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_write(&sqe, self.fd, self.buf, self.offset);
-            self.io_id = ctx.queue_io(sqe);
+            // this is because of a problem with stdlib API
+            var iovec = std.posix.iovec{
+                .base = @constCast(self.buf.ptr),
+                .len = self.buf.len,
+            };
+            switch (self.fd) {
+                .fd => |fd| {
+                    sqe.prep_write_fixed(fd, &iovec, self.offset, 0);
+                },
+                .fixed => |idx| {
+                    sqe.prep_write_fixed(@intCast(idx), &iovec, self.offset, 0);
+                    sqe.flags |= linux.IOSQE_FIXED_FILE;
+                },
+            }
+            self.io_id = if (self.direct) ctx.queue_polled_io(sqe) else ctx.queue_io(sqe);
             return .pending;
         }
     }
 };
 
+pub const DirectRead = struct {
+    inner: Read,
+
+    pub fn init(fd: Fd, buf: []u8, offset: u64) DirectRead {
+        return .{
+            .inner = .{
+                .fd = fd,
+                .buf = buf,
+                .offset = offset,
+                .io_id = null,
+                .finished = false,
+                .direct = true,
+            },
+        };
+    }
+
+    pub fn poll(self: *DirectRead, ctx: *const Context) Poll(Result(usize, linux.E)) {
+        return self.inner.poll(ctx);
+    }
+};
+
 pub const Read = struct {
-    fd: linux.fd_t,
+    fd: Fd,
     offset: u64,
     buf: []u8,
+    direct: bool,
 
     io_id: ?u64,
     finished: bool,
 
-    pub fn init(fd: linux.fd_t, buf: []u8, offset: u64) Read {
+    pub fn init(fd: Fd, buf: []u8, offset: u64) Read {
         return .{
             .fd = fd,
             .buf = buf,
             .offset = offset,
             .io_id = null,
             .finished = false,
+            .direct = false,
         };
     }
 
@@ -566,9 +260,26 @@ pub const Read = struct {
                 return .pending;
             }
         } else {
+            if (self.buf.len == 0) {
+                self.finished = true;
+                return .{ .ready = .{ .ok = 0 } };
+            }
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_read(&sqe, self.fd, self.buf, self.offset);
-            self.io_id = ctx.queue_io(sqe);
+            // this is because of a problem with stdlib API
+            var iovec = std.posix.iovec{
+                .base = self.buf.ptr,
+                .len = self.buf.len,
+            };
+            switch (self.fd) {
+                .fd => |fd| {
+                    sqe.prep_read_fixed(fd, &iovec, self.offset, 0);
+                },
+                .fixed => |idx| {
+                    sqe.prep_read_fixed(@intCast(idx), &iovec, self.offset, 0);
+                    sqe.flags |= linux.IOSQE_FIXED_FILE;
+                },
+            }
+            self.io_id = if (self.direct) ctx.queue_polled_io(sqe) else ctx.queue_io(sqe);
             return .pending;
         }
     }
@@ -648,7 +359,7 @@ pub const Close = struct {
 };
 
 pub const FAllocate = struct {
-    fd: linux.fd_t,
+    fd: Fd,
     mode: i32,
     offset: u64,
     size: u64,
@@ -656,7 +367,7 @@ pub const FAllocate = struct {
     io_id: ?u64,
     finished: bool,
 
-    pub fn init(fd: linux.fd_t, mode: i32, offset: u64, size: u64) FAllocate {
+    pub fn init(fd: Fd, mode: i32, offset: u64, size: u64) FAllocate {
         return .{
             .fd = fd,
             .mode = mode,
@@ -685,7 +396,15 @@ pub const FAllocate = struct {
             }
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_fallocate(self.fd, self.mode, self.offset, self.size);
+            switch (self.fd) {
+                .fd => |fd| {
+                    sqe.prep_fallocate(fd, self.mode, self.offset, self.size);
+                },
+                .fixed => |idx| {
+                    sqe.prep_fallocate(@intCast(idx), self.mode, self.offset, self.size);
+                    sqe.flags |= linux.IOSQE_FIXED_FILE;
+                },
+            }
             self.io_id = ctx.queue_io(sqe);
             return .pending;
         }
