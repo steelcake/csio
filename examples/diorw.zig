@@ -1,5 +1,4 @@
 const std = @import("std");
-const posix = std.posix;
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const Instant = std.time.Instant;
@@ -10,8 +9,8 @@ const fs = csio.fs;
 pub const log_level: std.log.Level = .debug;
 
 pub fn main() !void {
-    const mem = alloc_thp(1 << 30) orelse unreachable;
-    defer posix.munmap(mem);
+    const mem = try std.heap.page_allocator.alloc(u8, 1 << 30);
+    defer std.heap.page_allocator.free(mem);
 
     var fb_alloc = std.heap.FixedBufferAllocator.init(mem);
     const alloc = fb_alloc.allocator();
@@ -22,7 +21,7 @@ pub fn main() !void {
     });
     defer exec.deinit(alloc);
 
-    var main_task = MainTask.init("testfile", 1 << 32);
+    var main_task = MainTask.init("testfile", 1 << 34);
     exec.run(main_task.task());
 }
 
@@ -114,7 +113,7 @@ const MainTask = struct {
 const Read = struct {
     const Self = @This();
 
-    const CONCURRENCY = 8;
+    const CONCURRENCY = 64;
     const IO_SIZE = 1 << 19;
 
     const State = union(enum) {
@@ -284,7 +283,7 @@ const Read = struct {
 const Write = struct {
     const Self = @This();
 
-    const CONCURRENCY = 8;
+    const CONCURRENCY = 64;
     const IO_SIZE = 1 << 19;
 
     const State = union(enum) {
@@ -578,27 +577,3 @@ const SetupFile = struct {
         }
     }
 };
-
-fn alloc_thp(size: usize) ?[]align(1 << 12) u8 {
-    if (size == 0) {
-        return null;
-    }
-    const alloc_size = fs.align_forward(size, 1 << 21);
-    const page = mmap_wrapper(alloc_size, 0) orelse return null;
-    posix.madvise(page.ptr, page.len, posix.MADV.HUGEPAGE) catch {
-        posix.munmap(page);
-        return null;
-    };
-    return page;
-}
-
-fn mmap_wrapper(size: usize, huge_page_flag: u32) ?[]align(1 << 12) u8 {
-    if (size == 0) {
-        return null;
-    }
-    const flags = linux.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true, .HUGETLB = huge_page_flag != 0, .POPULATE = true, .LOCKED = true };
-    const flags_int: u32 = @bitCast(flags);
-    const flags_f: linux.MAP = @bitCast(flags_int | huge_page_flag);
-    const page = posix.mmap(null, size, posix.PROT.READ | posix.PROT.WRITE, flags_f, -1, 0) catch return null;
-    return page;
-}
