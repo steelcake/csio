@@ -39,7 +39,8 @@ pub const Context = struct {
     pub fn yield_if_needed(self: *const Context) bool {
         const now = Instant.now() catch unreachable;
 
-        if (now.since(self.start_t) > self.preempt_duration_ns) {
+        // leave 500us difference here
+        if (now.since(self.start_t) >= self.preempt_duration_ns - 500000) {
             _ = self.to_notify.insert(self.task_id, {}) catch unreachable;
             return true;
         } else {

@@ -50,7 +50,7 @@ pub const Executor = struct {
 
         const io_alloc = try IoAlloc.init(params.io_alloc_capacity, max_io, params.alloc);
 
-        const io_ring = try IoUring.init(.{
+        var io_ring = try IoUring.init(.{
             .entries = params.entries,
             .max_io = max_io,
             .register_fd_capacity = params.register_fd_capacity,
@@ -71,6 +71,15 @@ pub const Executor = struct {
         });
 
         polled_io_ring.ring.register_buffers(&.{
+            std.posix.iovec{
+                .base = io_alloc.buf.ptr,
+                .len = io_alloc.buf.len,
+            },
+        }) catch {
+            return error.RegisterBuffersFail;
+        };
+
+        io_ring.ring.register_buffers(&.{
             std.posix.iovec{
                 .base = io_alloc.buf.ptr,
                 .len = io_alloc.buf.len,
@@ -138,7 +147,7 @@ pub const Executor = struct {
                 // Don't hog CPU while waiting for io to finish or submission queue to free up.
                 // The sleep is for 1 nanosecond but the intention here is to just yield the cpu core to the OS so It can do other things with it
                 // before coming back to this thread.
-                std.Thread.sleep(1);
+                // std.Thread.sleep(1);
             }
 
             // Run tasks
@@ -172,9 +181,9 @@ pub const Executor = struct {
 
                 const now = Instant.now() catch unreachable;
                 const elapsed = now.since(start);
-                if (elapsed > self.preempt_duration_ns) {
-                    std.log.warn("A task took more than the configured preempt duration to run. It took {}ms.", .{elapsed / (1000 * 1000)});
-                }
+                // if (elapsed > self.preempt_duration_ns) {
+                    std.log.warn("A task took more than the configured preempt duration to run. It took {}ms.", .{elapsed / (1000 )});
+                // }
 
                 self.drive_io();
             }
