@@ -147,7 +147,7 @@ pub const Executor = struct {
                 // Don't hog CPU while waiting for io to finish or submission queue to free up.
                 // The sleep is for 1 nanosecond but the intention here is to just yield the cpu core to the OS so It can do other things with it
                 // before coming back to this thread.
-                // std.Thread.sleep(1);
+                std.Thread.sleep(1);
             }
 
             // Run tasks
