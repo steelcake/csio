@@ -10,7 +10,8 @@ pub const IoAlloc = struct {
     num_free: u32,
     buf: []align(ALIGN) u8,
 
-    pub fn init(capacity: u32, num_slots: u32, allocator: Allocator) error{OutOfMemory}!IoAlloc {
+    pub fn init(capacity: u32, slots: u32, allocator: Allocator) error{OutOfMemory}!IoAlloc {
+        const num_slots = 2 * slots;
         if (capacity == 0 or num_slots == 0) {
             return .{
                 .free_sizes = &.{},

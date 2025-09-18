@@ -39,7 +39,8 @@ pub const Context = struct {
     pub fn yield_if_needed(self: *const Context) bool {
         const now = Instant.now() catch unreachable;
 
-        if (now.since(self.start_t) > self.preempt_duration_ns) {
+        // leave 500us difference here
+        if (now.since(self.start_t) >= self.preempt_duration_ns - 500000) {
             _ = self.to_notify.insert(self.task_id, {}) catch unreachable;
             return true;
         } else {
@@ -131,6 +132,41 @@ pub const Context = struct {
         self.polled_ring.ring.register_files_update(idx, &.{-1}) catch unreachable;
         self.fixed_fd[idx] = -1;
         return fd;
+    }
+};
+
+pub const IoOp = struct {
+    sqe: linux.io_uring_sqe,
+    io_id: ?u64,
+    finished: bool,
+
+    pub fn init(sqe: linux.io_uring_sqe) IoOp {
+        return .{
+            .sqe = sqe,
+            .io_id = null,
+            .finished = false,
+        };
+    }
+
+    pub fn poll(self: *IoOp, ctx: *const Context) Poll(Result(i32, linux.E)) {
+        std.debug.assert(!self.finished);
+
+        if (self.io_id) |io_id| {
+            if (ctx.remove_io_result(io_id)) |cqe| {
+                self.finished = true;
+                switch (cqe.err()) {
+                    .SUCCESS => {
+                        return .{ .ready = .{ .ok = cqe.res } };
+                    },
+                    else => |e| return .{ .ready = .{ .err = e } },
+                }
+            } else {
+                return .pending;
+            }
+        } else {
+            self.io_id = ctx.queue_io(self.sqe);
+            return .pending;
+        }
     }
 };
 

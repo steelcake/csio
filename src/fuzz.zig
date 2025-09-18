@@ -248,7 +248,7 @@ fn fuzz_slicemap(data: []const u8, alloc: Allocator) !void {
                 var idx: u32 = 0;
                 const val = while (idx < slicemap.len) : (idx += 1) {
                     if (slicemap.keys[idx] == key) {
-                        break slicemap.swap_remove(idx);
+                        break if (slicemap.swap_remove(idx)) |kv| kv.value else null;
                     }
                 } else null;
                 const ref_val = if (hashmap.fetchRemove(key)) |kv| kv.value else null;

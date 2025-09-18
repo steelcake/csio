@@ -6,6 +6,7 @@ const Context = task_mod.Context;
 const Poll = task_mod.Poll;
 const Result = task_mod.Result;
 const Fd = task_mod.Fd;
+const IoOp = task_mod.IoOp;
 
 pub fn align_forward(addr: usize, alignment: usize) usize {
     return (addr +% alignment -% 1) & ~(alignment -% 1);
@@ -16,42 +17,31 @@ pub fn align_backward(addr: usize, alignment: usize) usize {
 }
 
 pub const Mkdir = struct {
-    path: [:0]const u8,
-    mode: linux.mode_t,
-
-    io_id: ?u64,
-    finished: bool,
+    op: IoOp,
 
     pub fn init(path: [:0]const u8, mode: linux.mode_t) Mkdir {
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        sqe.prep_mkdirat(linux.AT.FDCWD, path, mode);
+
         return .{
-            .path = path,
-            .mode = mode,
-            .io_id = null,
-            .finished = false,
+            .op = IoOp.init(sqe),
         };
     }
 
     pub fn poll(self: *Mkdir, ctx: *const Context) Poll(Result(void, linux.E)) {
-        std.debug.assert(!self.finished);
-
-        if (self.io_id) |io_id| {
-            if (ctx.remove_io_result(io_id)) |cqe| {
-                self.finished = true;
-                switch (cqe.err()) {
-                    .SUCCESS => {
-                        std.debug.assert(cqe.res == 0);
+        switch (self.op.poll(ctx)) {
+            .ready => |res| {
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
                         return .{ .ready = .{ .ok = {} } };
                     },
-                    else => |e| return .{ .ready = .{ .err = e } },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
                 }
-            } else {
-                return .pending;
-            }
-        } else {
-            var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_mkdirat(&sqe, linux.AT.FDCWD, self.path, self.mode);
-            self.io_id = ctx.queue_io(sqe);
-            return .pending;
+            },
+            .pending => return .pending,
         }
     }
 };
@@ -85,42 +75,31 @@ pub const RemoveDir = struct {
 };
 
 pub const UnlinkAt = struct {
-    path: [:0]const u8,
-    flags: u32,
-
-    io_id: ?u64,
-    finished: bool,
+    op: IoOp,
 
     pub fn init(path: [:0]const u8, flags: u32) UnlinkAt {
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        sqe.prep_unlinkat(linux.AT.FDCWD, path, flags);
+
         return .{
-            .path = path,
-            .flags = flags,
-            .io_id = null,
-            .finished = false,
+            .op = IoOp.init(sqe),
         };
     }
 
     pub fn poll(self: *UnlinkAt, ctx: *const Context) Poll(Result(void, linux.E)) {
-        std.debug.assert(!self.finished);
-
-        if (self.io_id) |io_id| {
-            if (ctx.remove_io_result(io_id)) |cqe| {
-                self.finished = true;
-                switch (cqe.err()) {
-                    .SUCCESS => {
-                        std.debug.assert(cqe.res == 0);
+        switch (self.op.poll(ctx)) {
+            .ready => |res| {
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
                         return .{ .ready = .{ .ok = {} } };
                     },
-                    else => |e| return .{ .ready = .{ .err = e } },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
                 }
-            } else {
-                return .pending;
-            }
-        } else {
-            var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_unlinkat(linux.AT.FDCWD, self.path, self.flags);
-            self.io_id = ctx.queue_io(sqe);
-            return .pending;
+            },
+            .pending => return .pending,
         }
     }
 };
@@ -286,127 +265,97 @@ pub const Read = struct {
 };
 
 pub const Open = struct {
-    path: [:0]const u8,
-    flags: linux.O,
-    mode: linux.mode_t,
-
-    io_id: ?u64,
-    finished: bool,
+    op: IoOp,
 
     pub fn init(path: [:0]const u8, flags: linux.O, mode: linux.mode_t) Open {
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        sqe.prep_openat(linux.AT.FDCWD, path, flags, mode);
+
         return .{
-            .path = path,
-            .flags = flags,
-            .mode = mode,
-            .io_id = null,
-            .finished = false,
+            .op = IoOp.init(sqe),
         };
     }
 
     pub fn poll(self: *Open, ctx: *const Context) Poll(Result(linux.fd_t, linux.E)) {
-        std.debug.assert(!self.finished);
-
-        if (self.io_id) |io_id| {
-            if (ctx.remove_io_result(io_id)) |cqe| {
-                self.finished = true;
-
-                switch (cqe.err()) {
-                    .SUCCESS => return .{ .ready = .{ .ok = @intCast(cqe.res) } },
-                    else => |e| return .{ .ready = .{ .err = e } },
+        switch (self.op.poll(ctx)) {
+            .ready => |res| {
+                switch (res) {
+                    .ok => |r| {
+                        return .{ .ready = .{ .ok = @intCast(r) } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
                 }
-            } else {
-                return .pending;
-            }
-        } else {
-            var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_openat(linux.AT.FDCWD, self.path, self.flags, self.mode);
-            self.io_id = ctx.queue_io(sqe);
-            return .pending;
+            },
+            .pending => return .pending,
         }
     }
 };
 
 pub const Close = struct {
-    fd: linux.fd_t,
-
-    io_id: ?u64,
-    finished: bool,
+    op: IoOp,
 
     pub fn init(fd: linux.fd_t) Close {
-        return .{ .fd = fd, .io_id = null, .finished = false };
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        sqe.prep_close(fd);
+        return .{
+            .op = IoOp.init(sqe),
+        };
     }
 
     pub fn poll(self: *Close, ctx: *const Context) Poll(Result(void, linux.E)) {
-        std.debug.assert(!self.finished);
-
-        if (self.io_id) |io_id| {
-            if (ctx.remove_io_result(io_id)) |cqe| {
-                self.finished = true;
-                switch (cqe.err()) {
-                    .SUCCESS => return .{ .ready = .{ .ok = {} } },
-                    else => |e| return .{ .ready = .{ .err = e } },
+        switch (self.op.poll(ctx)) {
+            .ready => |res| {
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
+                        return .{ .ready = .{ .ok = {} } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
                 }
-            } else {
-                return .pending;
-            }
-        } else {
-            var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_close(self.fd);
-            self.io_id = ctx.queue_io(sqe);
-            return .pending;
+            },
+            .pending => return .pending,
         }
     }
 };
 
 pub const FAllocate = struct {
-    fd: Fd,
-    mode: i32,
-    offset: u64,
-    size: u64,
-
-    io_id: ?u64,
-    finished: bool,
+    op: IoOp,
 
     pub fn init(fd: Fd, mode: i32, offset: u64, size: u64) FAllocate {
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        switch (fd) {
+            .fd => |f| {
+                sqe.prep_fallocate(f, mode, offset, size);
+            },
+            .fixed => |idx| {
+                sqe.prep_fallocate(@intCast(idx), mode, offset, size);
+                sqe.flags |= linux.IOSQE_FIXED_FILE;
+            },
+        }
+
         return .{
-            .fd = fd,
-            .mode = mode,
-            .offset = offset,
-            .size = size,
-            .io_id = null,
-            .finished = false,
+            .op = IoOp.init(sqe),
         };
     }
 
     pub fn poll(self: *FAllocate, ctx: *const Context) Poll(Result(void, linux.E)) {
-        std.debug.assert(!self.finished);
-
-        if (self.io_id) |io_id| {
-            if (ctx.remove_io_result(io_id)) |cqe| {
-                self.finished = true;
-                switch (cqe.err()) {
-                    .SUCCESS => {
-                        std.debug.assert(cqe.res == 0);
+        switch (self.op.poll(ctx)) {
+            .ready => |res| {
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
                         return .{ .ready = .{ .ok = {} } };
                     },
-                    else => |e| return .{ .ready = .{ .err = e } },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
                 }
-            } else {
-                return .pending;
-            }
-        } else {
-            var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            switch (self.fd) {
-                .fd => |fd| {
-                    sqe.prep_fallocate(fd, self.mode, self.offset, self.size);
-                },
-                .fixed => |idx| {
-                    sqe.prep_fallocate(@intCast(idx), self.mode, self.offset, self.size);
-                    sqe.flags |= linux.IOSQE_FIXED_FILE;
-                },
-            }
-            self.io_id = ctx.queue_io(sqe);
-            return .pending;
+            },
+            .pending => return .pending,
         }
     }
 };
