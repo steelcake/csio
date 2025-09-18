@@ -2,7 +2,7 @@ const std = @import("std");
 const Alignment = std.mem.Alignment;
 const Allocator = std.mem.Allocator;
 
-const FreeNode = packed struct (u64) {
+const FreeNode = packed struct(u64) {
     next_free: u32,
     size: u32,
 };
@@ -14,9 +14,9 @@ pub const IoAlloc = struct {
     buf_len: u32,
     first_free: u32,
 
-    pub fn init(buf: []align(ALIGN)u8) IoAlloc {
+    pub fn init(buf: []align(ALIGN) u8) IoAlloc {
         const buf_len: u32 = @intCast(buf.len);
-        const buf_addr: usize = @intFromPtr(buf.ptr); 
+        const buf_addr: usize = @intFromPtr(buf.ptr);
 
         std.debug.assert(buf_len % ALIGN == 0);
 
@@ -44,11 +44,9 @@ pub const IoAlloc = struct {
 
         // find first sufficient slot
         var free_node: *FreeNode = @ptrFromInt(self.buf_addr + self.first_free);
-        while(true) {
+        while (true) {
             const next_free: *FreeNode = @ptrFromInt(self.buf_addr + free_node.next_free);
-            if (free_node.size >= len) {
-                 
-            } else if (free_node.next_free == self.buf_len) {
+            if (free_node.size >= len) {} else if (free_node.next_free == self.buf_len) {
                 return error.OutOfIOMemory;
             } else {
                 free_node = @ptrFromInt(self.buf_addr + free_node.next_free);
@@ -75,7 +73,7 @@ pub const IoAlloc = struct {
             }
         }
 
-        const out = @as([*]align(ALIGN)u8, @ptrCast(free_node))[0..len];
+        const out = @as([*]align(ALIGN) u8, @ptrCast(free_node))[0..len];
 
         if (free_node.size == len) {
             const next_free_node: *FreeNode = @ptrCast(self.buf_addr + free_node.next_free);

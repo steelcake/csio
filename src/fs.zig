@@ -49,7 +49,7 @@ pub const Mkdir = struct {
             }
         } else {
             var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            sqe.prep_mkdirat(&sqe, linux.AT.FDCWD, self.path, self.mode);
+            sqe.prep_mkdirat(linux.AT.FDCWD, self.path, self.mode);
             self.io_id = ctx.queue_io(sqe);
             return .pending;
         }
