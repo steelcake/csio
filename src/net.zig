@@ -146,7 +146,10 @@ pub const Recv = struct {
     pub fn poll(self: *Recv, ctx: *const Context) Poll(Result(usize, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                return .{ .ready = .{ .ok = @intCast(res) } };
+                switch (res) {
+                    .ok => |r| return .{ .ready = .{ .ok = @intCast(r) } },
+                    .err => |e| return .{ .ready = .{ .err = e } },
+                }
             },
             .pending => return .pending,
         }
@@ -176,7 +179,10 @@ pub const Send = struct {
     pub fn poll(self: *Send, ctx: *const Context) Poll(Result(usize, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                return .{ .ready = .{ .ok = @intCast(res) } };
+                switch (res) {
+                    .ok => |r| return .{ .ready = .{ .ok = @intCast(r) } },
+                    .err => |e| return .{ .ready = .{ .err = e } },
+                }
             },
             .pending => return .pending,
         }
@@ -206,8 +212,15 @@ pub const Accept = struct {
     pub fn poll(self: *Accept, ctx: *const Context) Poll(Result(linux.fd_t, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                std.debug.assert(res >= 0);
-                return .{ .ready = .{ .ok = @intCast(res) } };
+                switch (res) {
+                    .ok => {
+                        std.debug.assert(res >= 0);
+                        return .{ .ready = .{ .ok = @intCast(res) } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
             },
             .pending => return .pending,
         }

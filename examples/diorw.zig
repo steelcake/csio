@@ -1,5 +1,4 @@
 const std = @import("std");
-const posix = std.posix;
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const Instant = std.time.Instant;
@@ -9,43 +8,9 @@ const fs = csio.fs;
 
 pub const log_level: std.log.Level = .debug;
 
-fn alloc_thp(size: usize) ?[]align(1 << 12) u8 {
-    if (size == 0) {
-        return null;
-    }
-
-    const alloc_size = fs.align_forward(size, 1 << 21);
-
-    const page = mmap_wrapper(alloc_size, 0) orelse return null;
-
-    posix.madvise(page.ptr, page.len, posix.MADV.HUGEPAGE) catch {
-        posix.munmap(page);
-
-        return null;
-    };
-
-    return page;
-}
-
-fn mmap_wrapper(size: usize, huge_page_flag: u32) ?[]align(1 << 12) u8 {
-    if (size == 0) {
-        return null;
-    }
-
-    const flags = linux.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true, .HUGETLB = huge_page_flag != 0, .POPULATE = true, .LOCKED = true };
-
-    const flags_int: u32 = @bitCast(flags);
-
-    const flags_f: linux.MAP = @bitCast(flags_int | huge_page_flag);
-
-    const page = posix.mmap(null, size, posix.PROT.READ | posix.PROT.WRITE, flags_f, -1, 0) catch return null;
-
-    return page;
-}
-
 pub fn main() !void {
-    const mem = alloc_thp(1 << 30) orelse unreachable;
-    defer posix.munmap(mem);
+    const mem = try std.heap.page_allocator.alloc(u8, 1 << 30);
+    defer std.heap.page_allocator.free(mem);
 
     var fb_alloc = std.heap.FixedBufferAllocator.init(mem);
     const alloc = fb_alloc.allocator();
@@ -56,7 +21,7 @@ pub fn main() !void {
     });
     defer exec.deinit(alloc);
 
-    var main_task = MainTask.init("testfile", 1 << 32);
+    var main_task = MainTask.init("testfile", 1 << 34);
     exec.run(main_task.task());
 }
 
@@ -171,7 +136,6 @@ const Read = struct {
     state: State,
 
     fn init(path: [:0]const u8, file_size: u64) Self {
-        std.debug.assert(file_size % IO_SIZE == 0);
         return .{
             .path = path,
             .file_size = file_size,
@@ -249,24 +213,19 @@ const Read = struct {
                                         switch (res) {
                                             .ok => |n_read| {
                                                 if (n_read != IO_SIZE) {
-                                                    std.log.warn("unexpected number of bytes read. Expected {}, Read{}", .{ IO_SIZE, n_read });
-                                                    unreachable;
+                                                    std.debug.panic("unexpected number of bytes read. Expected {}, Read{}", .{ IO_SIZE, n_read });
                                                 }
                                             },
                                             .err => |e| std.debug.panic("failed read: {}", .{e}),
                                         }
 
-                                        for (r.buffers[idx]) |x| {
-                                            std.debug.assert(x == 69);
+                                        const buf_typed: []const u64 = @ptrCast(@alignCast(r.buffers[idx]));
+                                        const io_offset = r.io_offset[idx];
+                                        var mismatch: bool = false;
+                                        for (buf_typed, 0..) |x, i| {
+                                            mismatch |= x != io_offset +% i;
                                         }
-
-                                        // const buf_typed: []const u64 = @ptrCast(@alignCast(r.buffers[idx]));
-                                        // const io_offset = r.io_offset[idx];
-                                        // var mismatch: bool = false;
-                                        // for (buf_typed, 0..) |x, i| {
-                                        //     mismatch |= x != io_offset +% i;
-                                        // }
-                                        // std.debug.assert(!mismatch);
+                                        std.debug.assert(!mismatch);
 
                                         io_ptr.* = null;
                                     },
@@ -324,8 +283,8 @@ const Read = struct {
 const Write = struct {
     const Self = @This();
 
-    const CONCURRENCY = 48;
-    const IO_SIZE = 1 << 20;
+    const CONCURRENCY = 64;
+    const IO_SIZE = 1 << 19;
 
     const State = union(enum) {
         start,
@@ -346,7 +305,6 @@ const Write = struct {
     state: State,
 
     fn init(path: [:0]const u8, file_size: u64) Write {
-        std.debug.assert(file_size % IO_SIZE == 0);
         return .{
             .path = path,
             .file_size = file_size,
@@ -414,6 +372,9 @@ const Write = struct {
                 .write => |*s| {
                     var pending: u32 = 0;
                     io: for (0..CONCURRENCY) |idx| {
+                        if (ctx.yield_if_needed()) {
+                            return .pending;
+                        }
                         const io_ptr = &s.io[idx];
                         while (true) {
                             if (io_ptr.*) |*io| {
@@ -438,18 +399,13 @@ const Write = struct {
                             } else if (self.file_size == s.offset) {
                                 continue :io;
                             } else {
-                                if (ctx.yield_if_needed()) {
-                                    return .pending;
-                                }
                                 const buf = s.buffers[idx];
                                 std.debug.assert(buf.len == IO_SIZE);
 
-                                @memset(buf, 69);
-
-                                // const buf_data: []u64 = @ptrCast(@alignCast(buf));
-                                // for (0..buf_data.len) |i| {
-                                //     buf_data.ptr[i] = i +% s.offset;
-                                // }
+                                const buf_data: []u64 = @ptrCast(@alignCast(buf));
+                                for (0..buf_data.len) |i| {
+                                    buf_data.ptr[i] = i +% s.offset;
+                                }
 
                                 io_ptr.* = fs.DirectWrite.init(.{ .fixed = s.fd_idx }, buf, s.offset);
                                 s.offset += IO_SIZE;

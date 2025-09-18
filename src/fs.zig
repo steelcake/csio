@@ -31,8 +31,15 @@ pub const Mkdir = struct {
     pub fn poll(self: *Mkdir, ctx: *const Context) Poll(Result(void, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                std.debug.assert(res == 0);
-                return .{ .ready = .{ .ok = {} } };
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
+                        return .{ .ready = .{ .ok = {} } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
             },
             .pending => return .pending,
         }
@@ -82,8 +89,15 @@ pub const UnlinkAt = struct {
     pub fn poll(self: *UnlinkAt, ctx: *const Context) Poll(Result(void, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                std.debug.assert(res == 0);
-                return .{ .ready = .{ .ok = {} } };
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
+                        return .{ .ready = .{ .ok = {} } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
             },
             .pending => return .pending,
         }
@@ -265,8 +279,14 @@ pub const Open = struct {
     pub fn poll(self: *Open, ctx: *const Context) Poll(Result(linux.fd_t, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                std.debug.assert(res >= 0);
-                return .{ .ready = .{ .ok = @intCast(res) } };
+                switch (res) {
+                    .ok => |r| {
+                        return .{ .ready = .{ .ok = @intCast(r) } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
             },
             .pending => return .pending,
         }
@@ -287,8 +307,15 @@ pub const Close = struct {
     pub fn poll(self: *Close, ctx: *const Context) Poll(Result(void, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                std.debug.assert(res == 0);
-                return .{ .ready = .{ .ok = {} } };
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
+                        return .{ .ready = .{ .ok = {} } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
             },
             .pending => return .pending,
         }
@@ -318,8 +345,15 @@ pub const FAllocate = struct {
     pub fn poll(self: *FAllocate, ctx: *const Context) Poll(Result(void, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                std.debug.assert(res == 0);
-                return .{ .ready = .{ .ok = {} } };
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
+                        return .{ .ready = .{ .ok = {} } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
             },
             .pending => return .pending,
         }

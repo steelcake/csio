@@ -181,9 +181,9 @@ pub const Executor = struct {
 
                 const now = Instant.now() catch unreachable;
                 const elapsed = now.since(start);
-                // if (elapsed > self.preempt_duration_ns) {
-                std.log.warn("A task took more than the configured preempt duration to run. It took {}ms.", .{elapsed / (1000)});
-                // }
+                if (elapsed > self.preempt_duration_ns) {
+                    std.log.warn("A task took more than the configured preempt duration to run. It took {}ms.", .{elapsed / (1000 * 1000)});
+                }
 
                 self.drive_io();
             }
