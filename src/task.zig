@@ -135,6 +135,41 @@ pub const Context = struct {
     }
 };
 
+pub const IoOp = struct {
+    sqe: linux.io_uring_sqe,
+    io_id: ?u64,
+    finished: bool,
+
+    pub fn init(sqe: linux.io_uring_sqe) IoOp {
+        return .{
+            .sqe = sqe,
+            .io_id = null,
+            .finished = false,
+        };
+    }
+
+    pub fn poll(self: *IoOp, ctx: *const Context) Poll(Result(i32, linux.E)) {
+        std.debug.assert(!self.finished);
+
+        if (self.io_id) |io_id| {
+            if (ctx.remove_io_result(io_id)) |cqe| {
+                self.finished = true;
+                switch (cqe.err()) {
+                    .SUCCESS => {
+                        return .{ .ready = .{ .ok = cqe.res } };
+                    },
+                    else => |e| return .{ .ready = .{ .err = e } },
+                }
+            } else {
+                return .pending;
+            }
+        } else {
+            self.io_id = ctx.queue_io(self.sqe);
+            return .pending;
+        }
+    }
+};
+
 pub const Fd = union(enum) {
     fixed: u32,
     fd: linux.fd_t,
