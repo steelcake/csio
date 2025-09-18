@@ -2,81 +2,82 @@ const std = @import("std");
 const Alignment = std.mem.Alignment;
 const Allocator = std.mem.Allocator;
 
-const FreeNode = packed struct(u64) {
-    next_free: u32,
-    size: u32,
-};
-
 pub const IoAlloc = struct {
     pub const ALIGN = 512;
 
-    buf_addr: usize,
-    buf_len: u32,
-    first_free: u32,
+    free_sizes: []u32,
+    free_ptrs: []usize,
+    num_free: u32,
+    buf: []align(ALIGN) u8,
 
-    pub fn init(buf: []align(ALIGN) u8) IoAlloc {
-        const buf_len: u32 = @intCast(buf.len);
-        const buf_addr: usize = @intFromPtr(buf.ptr);
+    pub fn init(capacity: u32, slots: u32, allocator: Allocator) error{OutOfMemory}!IoAlloc {
+        const num_slots = 2 * slots;
+        if (capacity == 0 or num_slots == 0) {
+            return .{
+                .free_sizes = &.{},
+                .free_ptrs = &.{},
+                .num_free = 0,
+                .buf = &.{},
+            };
+        }
 
-        std.debug.assert(buf_len % ALIGN == 0);
+        const cap = (capacity + ALIGN - 1) / ALIGN * ALIGN;
 
-        const free_ptr: *FreeNode = @ptrFromInt(buf_addr);
-        free_ptr.size = buf_len;
-        free_ptr.next_free = buf_len;
+        const buf = try allocator.alignedAlloc(u8, Alignment.fromByteUnits(ALIGN), cap);
+        errdefer allocator.free(buf);
+        const free_sizes = try allocator.alloc(u32, num_slots);
+        errdefer allocator.free(free_sizes);
+        const free_ptrs = try allocator.alloc(usize, num_slots);
+        errdefer allocator.free(free_ptrs);
+
+        free_sizes[0] = cap;
+        free_ptrs[0] = @intFromPtr(buf.ptr);
 
         return .{
-            .buf_len = buf_len,
-            .buf_addr = buf_addr,
-            .first_free = 0,
+            .free_sizes = free_sizes,
+            .free_ptrs = free_ptrs,
+            .num_free = 1,
+            .buf = buf,
         };
     }
 
+    pub fn deinit(self: IoAlloc, allocator: Allocator) void {
+        allocator.free(self.free_sizes);
+        allocator.free(self.free_ptrs);
+        allocator.free(self.buf);
+    }
+
     pub fn alloc(self: *IoAlloc, len: u32) error{OutOfIOMemory}![]align(ALIGN) u8 {
-        std.debug.assert(len % ALIGN == 0);
-
-        if (self.buf_len == self.first_free) {
-            return error.OutOfIOMemory;
-        }
-
         if (len == 0) {
             return &.{};
         }
 
-        // find first sufficient slot
-        var free_node: *FreeNode = @ptrFromInt(self.buf_addr + self.first_free);
-        while (true) {
-            const next_free: *FreeNode = @ptrFromInt(self.buf_addr + free_node.next_free);
-            if (free_node.size >= len) {} else if (free_node.next_free == self.buf_len) {
-                return error.OutOfIOMemory;
-            } else {
-                free_node = @ptrFromInt(self.buf_addr + free_node.next_free);
-            }
-        }
+        std.debug.assert(len % ALIGN == 0);
 
-        while (free_node.next_free < self.buf_len) {
-            if (free_node.size >= len) {
-                break;
-            } else {
-                free_node = @ptrFromInt(self.buf_addr + free_node.next_free);
+        // find first sufficient slot
+        var idx: u32 = 0;
+        var min_idx: u32 = while (idx < self.num_free) : (idx += 1) {
+            const size = self.free_sizes.ptr[idx];
+            if (size >= len) {
+                break idx;
             }
         } else {
             return error.OutOfIOMemory;
-        }
+        };
 
         // find the smallest slot that is sufficient
-        var min_node: *FreeNode = free_node;
-        while (free_node.next_free < self.buf_len) {
-            free_node = @ptrFromInt(self.buf_addr + free_node.next_free);
-
-            if (free_node.size >= len and free_node.size < min_node.size) {
-                min_node = free_node;
+        var min_size = self.free_sizes.ptr[min_idx];
+        while (idx < self.num_free) : (idx += 1) {
+            const size = self.free_sizes.ptr[idx];
+            if (size >= len and size < min_size) {
+                min_idx = idx;
+                min_size = size;
             }
         }
 
-        const out = @as([*]align(ALIGN) u8, @ptrCast(free_node))[0..len];
+        const out = @as([*]align(ALIGN) u8, @ptrFromInt(self.free_ptrs.ptr[min_idx]))[0..len];
 
-        if (free_node.size == len) {
-            const next_free_node: *FreeNode = @ptrCast(self.buf_addr + free_node.next_free);
+        if (min_size == len) {
             // swap-remove the slot from free-list
             self.num_free -= 1;
             self.free_sizes.ptr[min_idx] = self.free_sizes.ptr[self.num_free];
@@ -89,14 +90,11 @@ pub const IoAlloc = struct {
 
         @memset(out, 0);
 
-        self.active_allocs += 1;
-
         return out;
     }
 
     pub fn free(self: *IoAlloc, slice: []align(ALIGN) u8) void {
         if (slice.len == 0) {
-            self.active_allocs -= 1;
             return;
         }
 
@@ -134,7 +132,5 @@ pub const IoAlloc = struct {
         self.free_ptrs.ptr[self.num_free] = addr;
         self.free_sizes.ptr[self.num_free] = @intCast(size);
         self.num_free += 1;
-
-        self.active_allocs -= 1;
     }
 };
