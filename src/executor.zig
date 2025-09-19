@@ -40,15 +40,15 @@ pub const Executor = struct {
     pub fn init(params: struct {
         max_num_tasks: u32 = 256,
         entries: u16 = 64,
-        io_alloc_capacity: u32 = 1 << 28,
         preempt_duration_ns: u64 = 3 * 1000 * 1000,
         register_fd_capacity: u32 = 1024,
+        io_backing_buf: []align(IoAlloc.ALIGN) u8,
         wq_fd: ?linux.fd_t,
         alloc: Allocator,
     }) error{ OutOfMemory, IoUringSetupFail, RegisterBuffersFail }!Self {
         const max_io: u32 = params.max_num_tasks * MAX_IO_PER_TASK;
 
-        const io_alloc = try IoAlloc.init(params.io_alloc_capacity, max_io, params.alloc);
+        const io_alloc = try IoAlloc.init(params.io_backing_buf, params.alloc);
 
         var io_ring = try IoUring.init(.{
             .entries = params.entries,
@@ -72,8 +72,8 @@ pub const Executor = struct {
 
         polled_io_ring.ring.register_buffers(&.{
             std.posix.iovec{
-                .base = io_alloc.buf.ptr,
-                .len = io_alloc.buf.len,
+                .base = params.io_backing_buf.ptr,
+                .len = params.io_backing_buf.len,
             },
         }) catch {
             return error.RegisterBuffersFail;
@@ -81,8 +81,8 @@ pub const Executor = struct {
 
         io_ring.ring.register_buffers(&.{
             std.posix.iovec{
-                .base = io_alloc.buf.ptr,
-                .len = io_alloc.buf.len,
+                .base = params.io_backing_buf.ptr,
+                .len = params.io_backing_buf.len,
             },
         }) catch {
             return error.RegisterBuffersFail;

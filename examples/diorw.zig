@@ -15,7 +15,11 @@ pub fn main() !void {
     var fb_alloc = std.heap.FixedBufferAllocator.init(mem);
     const alloc = fb_alloc.allocator();
 
+    const io_backing_buf = try alloc.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(csio.IO_ALIGN), 1 << 28);
+    defer alloc.free(io_backing_buf);
+
     var exec = try csio.Executor.init(.{
+        .io_backing_buf = io_backing_buf,
         .wq_fd = null,
         .alloc = alloc,
     });

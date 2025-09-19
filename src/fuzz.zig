@@ -24,10 +24,13 @@ fn overlaps(a: []const u8, b: []const u8) bool {
 fn fuzz_io_alloc(data: []const u8, alloc: Allocator) !void {
     var input = FuzzInput.init(data);
 
-    const num_slots = try input.int(u8);
-    const capacity = (try input.int(u32)) % (1 << 21);
+    const capacity = (try input.int(u32)) % (1 << 24);
+    const cap = (capacity + IoAlloc.ALIGN - 1) / IoAlloc.ALIGN * IoAlloc.ALIGN;
+    const num_slots = (cap / IoAlloc.ALIGN) / 4;
+    const backing_buf = try alloc.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(IoAlloc.ALIGN), cap);
+    defer alloc.free(backing_buf);
 
-    var io_alloc = try IoAlloc.init(capacity, num_slots, alloc);
+    var io_alloc = try IoAlloc.init(backing_buf, alloc);
     defer io_alloc.deinit(alloc);
 
     const buffers = try alloc.alloc([]align(IoAlloc.ALIGN) u8, num_slots);
@@ -302,7 +305,7 @@ fn to_fuzz_wrap(ctx: FuzzContext, data: []const u8) anyerror!void {
 }
 
 test "fuzz" {
-    var fb_alloc = FixedBufferAllocator.init(std.heap.page_allocator.alloc(u8, 1 << 22) catch unreachable);
+    var fb_alloc = FixedBufferAllocator.init(std.heap.page_allocator.alloc(u8, 1 << 30) catch unreachable);
     try std.testing.fuzz(FuzzContext{
         .fb_alloc = &fb_alloc,
     }, to_fuzz_wrap, .{});
