@@ -15,11 +15,11 @@ pub fn main() !void {
     var fb_alloc = std.heap.FixedBufferAllocator.init(mem);
     const alloc = fb_alloc.allocator();
 
-    const io_backing_buf = try alloc.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(csio.IO_ALIGN), 1 << 28);
-    defer alloc.free(io_backing_buf);
+    const direct_io_alloc_buf = try alloc.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(csio.IO_ALIGN), 1 << 28);
+    defer alloc.free(direct_io_alloc_buf);
 
     var exec = try csio.Executor.init(.{
-        .io_backing_buf = io_backing_buf,
+        .direct_io_alloc_buf = direct_io_alloc_buf,
         .wq_fd = null,
         .alloc = alloc,
     });
@@ -125,7 +125,7 @@ const Read = struct {
         open: struct { start_t: Instant, io: fs.Open },
         read: struct {
             fd_idx: u32,
-            buffers: [CONCURRENCY][]u8,
+            buffers: [CONCURRENCY][]align(512) u8,
             io: [CONCURRENCY]?fs.DirectRead,
             io_offset: [CONCURRENCY]u64,
             offset: u64,
@@ -179,9 +179,9 @@ const Read = struct {
 
                             const fd_idx = ctx.register_fd(fd);
 
-                            var buffers: [CONCURRENCY][]u8 = undefined;
+                            var buffers: [CONCURRENCY][]align(512) u8 = undefined;
                             for (0..CONCURRENCY) |idx| {
-                                buffers[idx] = ctx.alloc_io_buf(IO_SIZE);
+                                buffers[idx] = ctx.alloc_direct_io_buf(IO_SIZE);
                             }
 
                             var io: [CONCURRENCY]?fs.DirectRead = undefined;
@@ -258,7 +258,7 @@ const Read = struct {
                         std.log.info("IOPS: {d:.3}", .{num_io / elapsed});
 
                         for (r.buffers) |b| {
-                            ctx.free_io_buf(b);
+                            ctx.free_direct_io_buf(b);
                         }
 
                         const fd = ctx.unregister_fd(r.fd_idx);
@@ -295,7 +295,7 @@ const Write = struct {
         open: struct { io: fs.Open, start_t: Instant },
         write: struct {
             fd_idx: u32,
-            buffers: [CONCURRENCY][]u8,
+            buffers: [CONCURRENCY][]align(512) u8,
             io: [CONCURRENCY]?fs.DirectWrite,
             offset: u64,
             start_t: Instant,
@@ -350,9 +350,9 @@ const Write = struct {
 
                             const fd_idx = ctx.register_fd(fd);
 
-                            var buffers: [CONCURRENCY][]u8 = undefined;
+                            var buffers: [CONCURRENCY][]align(512) u8 = undefined;
                             for (0..CONCURRENCY) |idx| {
-                                buffers[idx] = ctx.alloc_io_buf(IO_SIZE);
+                                buffers[idx] = ctx.alloc_direct_io_buf(IO_SIZE);
                             }
 
                             var io: [CONCURRENCY]?fs.DirectWrite = undefined;
@@ -427,7 +427,7 @@ const Write = struct {
                         std.log.info("IOPS: {d:.3}", .{num_io / elapsed});
 
                         for (s.buffers) |b| {
-                            ctx.free_io_buf(b);
+                            ctx.free_direct_io_buf(b);
                         }
 
                         const fd = ctx.unregister_fd(s.fd_idx);

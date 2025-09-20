@@ -31,7 +31,7 @@ pub const Executor = struct {
     fixed_fd: []linux.fd_t,
 
     // Allocator for direct_io read/write
-    io_alloc: IoAlloc,
+    direct_io_alloc: IoAlloc,
 
     wq_fd: linux.fd_t,
 
@@ -42,15 +42,15 @@ pub const Executor = struct {
         entries: u16 = 64,
         preempt_duration_ns: u64 = 3 * 1000 * 1000,
         register_fd_capacity: u32 = 1024,
-        io_backing_buf: []align(IoAlloc.ALIGN) u8,
+        direct_io_alloc_buf: []align(IoAlloc.ALIGN) u8,
         wq_fd: ?linux.fd_t,
         alloc: Allocator,
     }) error{ OutOfMemory, IoUringSetupFail, RegisterBuffersFail }!Self {
         const max_io: u32 = params.max_num_tasks * MAX_IO_PER_TASK;
 
-        const io_alloc = try IoAlloc.init(params.io_backing_buf, params.alloc);
+        const direct_io_alloc = try IoAlloc.init(params.direct_io_alloc_buf, params.alloc);
 
-        var io_ring = try IoUring.init(.{
+        const io_ring = try IoUring.init(.{
             .entries = params.entries,
             .max_io = max_io,
             .register_fd_capacity = params.register_fd_capacity,
@@ -72,17 +72,8 @@ pub const Executor = struct {
 
         polled_io_ring.ring.register_buffers(&.{
             std.posix.iovec{
-                .base = params.io_backing_buf.ptr,
-                .len = params.io_backing_buf.len,
-            },
-        }) catch {
-            return error.RegisterBuffersFail;
-        };
-
-        io_ring.ring.register_buffers(&.{
-            std.posix.iovec{
-                .base = params.io_backing_buf.ptr,
-                .len = params.io_backing_buf.len,
+                .base = params.direct_io_alloc_buf.ptr,
+                .len = params.direct_io_alloc_buf.len,
             },
         }) catch {
             return error.RegisterBuffersFail;
@@ -104,7 +95,7 @@ pub const Executor = struct {
             .to_notify = to_notify,
             .preempt_duration_ns = params.preempt_duration_ns,
             .wq_fd = wq_fd,
-            .io_alloc = io_alloc,
+            .direct_io_alloc = direct_io_alloc,
             .fixed_fd = fixed_fd,
         };
     }
@@ -126,7 +117,7 @@ pub const Executor = struct {
         self.io.deinit(alloc);
         self.tasks.deinit(alloc);
         self.to_notify.deinit(alloc);
-        self.io_alloc.deinit(alloc);
+        self.direct_io_alloc.deinit(alloc);
         alloc.free(self.fixed_fd);
     }
 
@@ -167,7 +158,7 @@ pub const Executor = struct {
                     .ring = &self.io_ring,
                     .polled_ring = &self.polled_io_ring,
                     .task_entry = entry,
-                    .io_alloc = &self.io_alloc,
+                    .direct_io_alloc = &self.direct_io_alloc,
                     .fixed_fd = self.fixed_fd,
                 });
                 switch (poll_res) {

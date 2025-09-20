@@ -7,6 +7,7 @@ const Poll = task_mod.Poll;
 const Result = task_mod.Result;
 const Fd = task_mod.Fd;
 const IoOp = task_mod.IoOp;
+const DirectIoOp = task_mod.DirectIoOp;
 
 pub fn align_forward(addr: usize, alignment: usize) usize {
     return (addr +% alignment -% 1) & ~(alignment -% 1);
@@ -104,162 +105,161 @@ pub const UnlinkAt = struct {
     }
 };
 
-pub const DirectWrite = struct {
-    inner: Write,
-
-    pub fn init(fd: Fd, buf: []const u8, offset: u64) DirectWrite {
-        return .{
-            .inner = .{
-                .fd = fd,
-                .buf = buf,
-                .offset = offset,
-                .io_id = null,
-                .finished = false,
-                .direct = true,
-            },
-        };
-    }
-
-    pub fn poll(self: *DirectWrite, ctx: *const Context) Poll(Result(usize, linux.E)) {
-        return self.inner.poll(ctx);
-    }
-};
-
-pub const Write = struct {
-    fd: Fd,
-    offset: u64,
-    buf: []const u8,
-    direct: bool,
-
-    io_id: ?u64,
-    finished: bool,
-
-    pub fn init(fd: Fd, buf: []const u8, offset: u64) Write {
-        return .{
-            .fd = fd,
-            .buf = buf,
-            .offset = offset,
-            .io_id = null,
-            .finished = false,
-            .direct = false,
-        };
-    }
-
-    pub fn poll(self: *Write, ctx: *const Context) Poll(Result(usize, linux.E)) {
-        std.debug.assert(!self.finished);
-
-        if (self.io_id) |io_id| {
-            if (ctx.remove_io_result(io_id)) |cqe| {
-                self.finished = true;
-                switch (cqe.err()) {
-                    .SUCCESS => return .{ .ready = .{ .ok = @intCast(cqe.res) } },
-                    else => |e| return .{ .ready = .{ .err = e } },
-                }
-            } else {
-                return .pending;
-            }
-        } else {
-            if (self.buf.len == 0) {
-                self.finished = true;
-                return .{ .ready = .{ .ok = 0 } };
-            }
-            var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            // this is because of a problem with stdlib API
-            var iovec = std.posix.iovec{
-                .base = @constCast(self.buf.ptr),
-                .len = self.buf.len,
-            };
-            switch (self.fd) {
-                .fd => |fd| {
-                    sqe.prep_write_fixed(fd, &iovec, self.offset, 0);
-                },
-                .fixed => |idx| {
-                    sqe.prep_write_fixed(@intCast(idx), &iovec, self.offset, 0);
-                    sqe.flags |= linux.IOSQE_FIXED_FILE;
-                },
-            }
-            self.io_id = if (self.direct) ctx.queue_polled_io(sqe) else ctx.queue_io(sqe);
-            return .pending;
-        }
-    }
-};
-
 pub const DirectRead = struct {
-    inner: Read,
+    op: DirectIoOp,
 
-    pub fn init(fd: Fd, buf: []u8, offset: u64) DirectRead {
-        return .{
-            .inner = .{
-                .fd = fd,
-                .buf = buf,
-                .offset = offset,
-                .io_id = null,
-                .finished = false,
-                .direct = true,
+    pub fn init(fd: Fd, buf: []align(512) u8, offset: u64) DirectRead {
+        // this is because of a problem with stdlib API
+        var iovec = std.posix.iovec{
+            .base = buf.ptr,
+            .len = buf.len,
+        };
+
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        switch (fd) {
+            .fd => |f| {
+                sqe.prep_read_fixed(f, &iovec, offset, 0);
             },
+            .fixed => |idx| {
+                sqe.prep_read_fixed(@intCast(idx), &iovec, offset, 0);
+                sqe.flags |= linux.IOSQE_FIXED_FILE;
+            },
+        }
+
+        return .{
+            .op = DirectIoOp.init(sqe),
         };
     }
 
     pub fn poll(self: *DirectRead, ctx: *const Context) Poll(Result(usize, linux.E)) {
-        return self.inner.poll(ctx);
+        switch (self.op.poll(ctx)) {
+            .ready => |res| {
+                switch (res) {
+                    .ok => |r| {
+                        return .{ .ready = .{ .ok = @intCast(r) } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
+            },
+            .pending => return .pending,
+        }
+    }
+};
+
+pub const DirectWrite = struct {
+    op: DirectIoOp,
+
+    pub fn init(fd: Fd, buf: []const u8, offset: u64) DirectWrite {
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        // this is because of a problem with stdlib API
+        var iovec = std.posix.iovec{
+            .base = @constCast(buf.ptr),
+            .len = buf.len,
+        };
+        switch (fd) {
+            .fd => |f| {
+                sqe.prep_write_fixed(f, &iovec, offset, 0);
+            },
+            .fixed => |idx| {
+                sqe.prep_write_fixed(@intCast(idx), &iovec, offset, 0);
+                sqe.flags |= linux.IOSQE_FIXED_FILE;
+            },
+        }
+
+        return .{
+            .op = DirectIoOp.init(sqe),
+        };
+    }
+
+    pub fn poll(self: *DirectWrite, ctx: *const Context) Poll(Result(usize, linux.E)) {
+        switch (self.op.poll(ctx)) {
+            .ready => |res| {
+                switch (res) {
+                    .ok => |r| {
+                        return .{ .ready = .{ .ok = @intCast(r) } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
+            },
+            .pending => return .pending,
+        }
     }
 };
 
 pub const Read = struct {
-    fd: Fd,
-    offset: u64,
-    buf: []u8,
-    direct: bool,
-
-    io_id: ?u64,
-    finished: bool,
+    op: IoOp,
 
     pub fn init(fd: Fd, buf: []u8, offset: u64) Read {
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        switch (fd) {
+            .fd => |f| {
+                sqe.prep_read(f, buf, offset);
+            },
+            .fixed => |idx| {
+                sqe.prep_read(@intCast(idx), buf, offset);
+                sqe.flags |= linux.IOSQE_FIXED_FILE;
+            },
+        }
+
         return .{
-            .fd = fd,
-            .buf = buf,
-            .offset = offset,
-            .io_id = null,
-            .finished = false,
-            .direct = false,
+            .op = IoOp.init(sqe),
         };
     }
 
     pub fn poll(self: *Read, ctx: *const Context) Poll(Result(usize, linux.E)) {
-        std.debug.assert(!self.finished);
-
-        if (self.io_id) |io_id| {
-            if (ctx.remove_io_result(io_id)) |cqe| {
-                self.finished = true;
-                switch (cqe.err()) {
-                    .SUCCESS => return .{ .ready = .{ .ok = @intCast(cqe.res) } },
-                    else => |e| return .{ .ready = .{ .err = e } },
+        switch (self.op.poll(ctx)) {
+            .ready => |res| {
+                switch (res) {
+                    .ok => |r| {
+                        return .{ .ready = .{ .ok = @intCast(r) } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
                 }
-            } else {
-                return .pending;
-            }
-        } else {
-            if (self.buf.len == 0) {
-                self.finished = true;
-                return .{ .ready = .{ .ok = 0 } };
-            }
-            var sqe = std.mem.zeroes(linux.io_uring_sqe);
-            // this is because of a problem with stdlib API
-            var iovec = std.posix.iovec{
-                .base = self.buf.ptr,
-                .len = self.buf.len,
-            };
-            switch (self.fd) {
-                .fd => |fd| {
-                    sqe.prep_read_fixed(fd, &iovec, self.offset, 0);
-                },
-                .fixed => |idx| {
-                    sqe.prep_read_fixed(@intCast(idx), &iovec, self.offset, 0);
-                    sqe.flags |= linux.IOSQE_FIXED_FILE;
-                },
-            }
-            self.io_id = if (self.direct) ctx.queue_polled_io(sqe) else ctx.queue_io(sqe);
-            return .pending;
+            },
+            .pending => return .pending,
+        }
+    }
+};
+
+pub const Write = struct {
+    op: IoOp,
+
+    pub fn init(fd: Fd, buf: []const u8, offset: u64) Write {
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        switch (fd) {
+            .fd => |f| {
+                sqe.prep_write(f, buf, offset);
+            },
+            .fixed => |idx| {
+                sqe.prep_write(@intCast(idx), buf, offset);
+                sqe.flags |= linux.IOSQE_FIXED_FILE;
+            },
+        }
+
+        return .{
+            .op = IoOp.init(sqe),
+        };
+    }
+
+    pub fn poll(self: *Write, ctx: *const Context) Poll(Result(usize, linux.E)) {
+        switch (self.op.poll(ctx)) {
+            .ready => |res| {
+                switch (res) {
+                    .ok => |r| {
+                        return .{ .ready = .{ .ok = @intCast(r) } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
+            },
+            .pending => return .pending,
         }
     }
 };

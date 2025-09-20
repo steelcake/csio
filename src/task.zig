@@ -34,7 +34,7 @@ pub const Context = struct {
     fixed_fd: []linux.fd_t,
 
     preempt_duration_ns: u64,
-    io_alloc: *IoAlloc,
+    direct_io_alloc: *IoAlloc,
 
     pub fn yield_if_needed(self: *const Context) bool {
         const now = Instant.now() catch unreachable;
@@ -95,12 +95,12 @@ pub const Context = struct {
         return null;
     }
 
-    pub fn alloc_io_buf(self: *const Context, size: u32) []u8 {
-        return self.io_alloc.alloc(size) catch unreachable;
+    pub fn alloc_direct_io_buf(self: *const Context, size: u32) []align(512) u8 {
+        return self.direct_io_alloc.alloc(size) catch unreachable;
     }
 
-    pub fn free_io_buf(self: *const Context, buf: []u8) void {
-        self.io_alloc.free(@alignCast(buf));
+    pub fn free_direct_io_buf(self: *const Context, buf: []align(512) u8) void {
+        self.direct_io_alloc.free(buf);
     }
 
     pub fn register_fd(self: *const Context, fd: linux.fd_t) u32 {
@@ -135,40 +135,47 @@ pub const Context = struct {
     }
 };
 
-pub const IoOp = struct {
-    sqe: linux.io_uring_sqe,
-    io_id: ?u64,
-    finished: bool,
+pub const IoOp = IoOpImpl(false);
+pub const DirectIoOp = IoOpImpl(true);
 
-    pub fn init(sqe: linux.io_uring_sqe) IoOp {
-        return .{
-            .sqe = sqe,
-            .io_id = null,
-            .finished = false,
-        };
-    }
+fn IoOpImpl(comptime is_polled: bool) type {
+    return struct {
+        const Self = @This();
 
-    pub fn poll(self: *IoOp, ctx: *const Context) Poll(Result(i32, linux.E)) {
-        std.debug.assert(!self.finished);
+        sqe: linux.io_uring_sqe,
+        io_id: ?u64,
+        finished: bool,
 
-        if (self.io_id) |io_id| {
-            if (ctx.remove_io_result(io_id)) |cqe| {
-                self.finished = true;
-                switch (cqe.err()) {
-                    .SUCCESS => {
-                        return .{ .ready = .{ .ok = cqe.res } };
-                    },
-                    else => |e| return .{ .ready = .{ .err = e } },
+        pub fn init(sqe: linux.io_uring_sqe) Self {
+            return .{
+                .sqe = sqe,
+                .io_id = null,
+                .finished = false,
+            };
+        }
+
+        pub fn poll(self: *Self, ctx: *const Context) Poll(Result(i32, linux.E)) {
+            std.debug.assert(!self.finished);
+
+            if (self.io_id) |io_id| {
+                if (ctx.remove_io_result(io_id)) |cqe| {
+                    self.finished = true;
+                    switch (cqe.err()) {
+                        .SUCCESS => {
+                            return .{ .ready = .{ .ok = cqe.res } };
+                        },
+                        else => |e| return .{ .ready = .{ .err = e } },
+                    }
+                } else {
+                    return .pending;
                 }
             } else {
+                self.io_id = if (is_polled) ctx.queue_polled_io(self.sqe) else ctx.queue_io(self.sqe);
                 return .pending;
             }
-        } else {
-            self.io_id = ctx.queue_io(self.sqe);
-            return .pending;
         }
-    }
-};
+    };
+}
 
 pub const Fd = union(enum) {
     fixed: u32,
