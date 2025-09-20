@@ -7,7 +7,6 @@ const Poll = task_mod.Poll;
 const Result = task_mod.Result;
 const Fd = task_mod.Fd;
 const IoOp = task_mod.IoOp;
-const DirectIoOp = task_mod.DirectIoOp;
 
 pub fn align_forward(addr: usize, alignment: usize) usize {
     return (addr +% alignment -% 1) & ~(alignment -% 1);
@@ -106,7 +105,7 @@ pub const UnlinkAt = struct {
 };
 
 pub const DirectRead = struct {
-    op: DirectIoOp,
+    op: IoOp,
 
     pub fn init(fd: Fd, buf: []align(512) u8, offset: u64) DirectRead {
         // this is because of a problem with stdlib API
@@ -127,7 +126,7 @@ pub const DirectRead = struct {
         }
 
         return .{
-            .op = DirectIoOp.init(sqe),
+            .op = IoOp.init_polled(sqe),
         };
     }
 
@@ -149,7 +148,7 @@ pub const DirectRead = struct {
 };
 
 pub const DirectWrite = struct {
-    op: DirectIoOp,
+    op: IoOp,
 
     pub fn init(fd: Fd, buf: []const u8, offset: u64) DirectWrite {
         var sqe = std.mem.zeroes(linux.io_uring_sqe);
@@ -169,7 +168,7 @@ pub const DirectWrite = struct {
         }
 
         return .{
-            .op = DirectIoOp.init(sqe),
+            .op = IoOp.init_polled(sqe),
         };
     }
 

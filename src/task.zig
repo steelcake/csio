@@ -135,47 +135,53 @@ pub const Context = struct {
     }
 };
 
-pub const IoOp = IoOpImpl(false);
-pub const DirectIoOp = IoOpImpl(true);
+pub const IoOp = struct {
+    const Self = @This();
 
-fn IoOpImpl(comptime is_polled: bool) type {
-    return struct {
-        const Self = @This();
+    sqe: linux.io_uring_sqe,
+    io_id: ?u64,
+    finished: bool,
+    is_polled: bool,
 
-        sqe: linux.io_uring_sqe,
-        io_id: ?u64,
-        finished: bool,
+    pub fn init_polled(sqe: linux.io_uring_sqe) Self {
+        return .{
+            .sqe = sqe,
+            .io_id = null,
+            .finished = false,
+            .is_polled = true,
+        };
+    }
 
-        pub fn init(sqe: linux.io_uring_sqe) Self {
-            return .{
-                .sqe = sqe,
-                .io_id = null,
-                .finished = false,
-            };
-        }
+    pub fn init(sqe: linux.io_uring_sqe) Self {
+        return .{
+            .sqe = sqe,
+            .io_id = null,
+            .finished = false,
+            .is_polled = false,
+        };
+    }
 
-        pub fn poll(self: *Self, ctx: *const Context) Poll(Result(i32, linux.E)) {
-            std.debug.assert(!self.finished);
+    pub fn poll(self: *Self, ctx: *const Context) Poll(Result(i32, linux.E)) {
+        std.debug.assert(!self.finished);
 
-            if (self.io_id) |io_id| {
-                if (ctx.remove_io_result(io_id)) |cqe| {
-                    self.finished = true;
-                    switch (cqe.err()) {
-                        .SUCCESS => {
-                            return .{ .ready = .{ .ok = cqe.res } };
-                        },
-                        else => |e| return .{ .ready = .{ .err = e } },
-                    }
-                } else {
-                    return .pending;
+        if (self.io_id) |io_id| {
+            if (ctx.remove_io_result(io_id)) |cqe| {
+                self.finished = true;
+                switch (cqe.err()) {
+                    .SUCCESS => {
+                        return .{ .ready = .{ .ok = cqe.res } };
+                    },
+                    else => |e| return .{ .ready = .{ .err = e } },
                 }
             } else {
-                self.io_id = if (is_polled) ctx.queue_polled_io(self.sqe) else ctx.queue_io(self.sqe);
                 return .pending;
             }
+        } else {
+            self.io_id = if (self.is_polled) ctx.queue_polled_io(self.sqe) else ctx.queue_io(self.sqe);
+            return .pending;
         }
-    };
-}
+    }
+};
 
 pub const Fd = union(enum) {
     fixed: u32,
