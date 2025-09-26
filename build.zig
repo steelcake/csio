@@ -37,7 +37,6 @@ pub fn build(b: *std.Build) void {
     const Example = enum {
         direct_io,
         tcp,
-        unknown,
     };
     const example_option = b.option(Example, "example", "Example to run, default is direct_io") orelse Example.direct_io;
     const example_step = b.step("example", "Run example");

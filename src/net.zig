@@ -256,3 +256,79 @@ pub const Accept = struct {
         }
     }
 };
+
+/// implements exact sending/receiving by looping until send/receive op goes through the entire buffer
+fn Exact(comptime Op: type) type {
+    return struct {
+        const Buf = switch (Op) {
+            Send => []const u8,
+            Recv => []u8,
+            else => @compileError("invalid exact op type"),
+        };
+
+        const Self = @This();
+
+        const State = union(enum) {
+            start,
+            op: Op,
+            finished,
+        };
+
+        buf: Buf,
+        fd: Fd,
+        flags: i32,
+
+        state: State,
+
+        pub fn init(fd: Fd, buf: Buf, flags: i32) Self {
+            return .{
+                .buf = buf,
+                .fd = fd,
+                .flags = flags,
+                .state = .start,
+            };
+        }
+
+        pub fn poll(self: *Self, ctx: *const Context) Poll(Result(void, linux.E)) {
+            while (true) {
+                switch (self.state) {
+                    .start => {
+                        self.state = .{
+                            .op = Op.init(self.fd, self.buf, self.flags),
+                        };
+                    },
+                    .op => |*s| {
+                        switch (s.poll(ctx)) {
+                            .ready => |res| {
+                                switch (res) {
+                                    .ok => |r| {
+                                        self.buf = self.buf[r..];
+                                        if (self.buf.len > 0) {
+                                            self.send = Op.init(self.fd, self.buf, self.flags);
+                                        } else {
+                                            self.state = .finished;
+                                            return .{ .ready = .{ .ok = {} } };
+                                        }
+                                    },
+                                    .err => |e| {
+                                        if (e == linux.E.INTR) {
+                                            s.* = Op.init(self.fd, self.buf, self.flags);
+                                        } else {
+                                            self.state = .finished;
+                                            return .{ .ready = .{ .err = e } };
+                                        }
+                                    },
+                                }
+                            },
+                            .pending => return .pending,
+                        }
+                    },
+                    .finished => unreachable,
+                }
+            }
+        }
+    };
+}
+
+pub const SendExact = Exact(Send);
+pub const RecvExact = Exact(Recv);

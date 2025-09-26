@@ -69,11 +69,11 @@ pub const Context = struct {
     }
 
     /// For queueing direct_io read/write only
-    pub fn queue_polled_io(self: *const Context, io: linux.io_uring_sqe) u64 {
+    fn queue_polled_io(self: *const Context, io: linux.io_uring_sqe) u64 {
         return self.queue_io_impl(true, io);
     }
 
-    pub fn queue_io(self: *const Context, io: linux.io_uring_sqe) u64 {
+    fn queue_io(self: *const Context, io: linux.io_uring_sqe) u64 {
         return self.queue_io_impl(false, io);
     }
 
@@ -97,7 +97,7 @@ pub const Context = struct {
         return io_id;
     }
 
-    pub fn remove_io_result(self: *const Context, io_id: u64) ?linux.io_uring_cqe {
+    fn remove_io_result(self: *const Context, io_id: u64) ?linux.io_uring_cqe {
         for (self.task_entry.finished_io[0..self.task_entry.num_finished_io], 0..) |cqe, idx| {
             if (cqe.user_data == io_id) {
                 const task_id = self.io.remove(io_id) orelse unreachable;

@@ -9,6 +9,9 @@ const net = csio.net;
 pub const log_level: std.log.Level = .debug;
 
 const PORT = 1131;
+const NUM_CLIENTS = 64;
+const NUM_PINGPONGS = 1 << 20;
+const MESSAGE_SIZE = 1024;
 
 pub fn main() !void {
     const mem = try std.heap.page_allocator.alloc(u8, 1 << 30);
@@ -34,8 +37,8 @@ const MainTask = struct {
     const State = union(enum) {
         start,
         setup_server: SetupServer,
-        // start_clients,
-        // run_server: RunServer,
+        start_clients: struct { server_fd_idx: u32 },
+        run_server: struct { inner: RunServer, server_fd_idx: u32, clients: []Client },
         close_server: net.Close,
         finished,
     };
@@ -60,15 +63,28 @@ const MainTask = struct {
                 },
                 .setup_server => |*f| {
                     switch (f.poll(ctx, self.alloc)) {
-                        .ready => |fd_idx| {
-                            const fd = ctx.unregister_fd(fd_idx);
+                        .ready => |server_fd_idx| {
                             self.state = .{
-                                .close_server = net.Close.init(fd),
+                                .start_clients = .{ .server_fd_idx = server_fd_idx },
                             };
-                            return .ready;
                         },
                         .pending => return .pending,
                     }
+                },
+                .start_clients => |*s| {
+                    const clients = self.alloc.alloc(Client, NUM_CLIENTS) catch unreachable;
+                    for (clients) |*c| {
+                        c.* = Client.init();
+                        ctx.spawn(c.task());
+                    }
+
+                    self.state = .run_server;
+                },
+                .run_server => |*s| {
+                    const fd = ctx.unregister_fd(fd_idx);
+                    self.state = .{
+                        .close_server = net.Close.init(fd),
+                    };
                 },
                 .close_server => |*f| {
                     switch (f.poll(ctx)) {
@@ -97,21 +113,50 @@ const MainTask = struct {
     }
 };
 
+const ClientPingPong = union(enum) {
+    start,
+    send: net.Send,
+    recv: net.Recv,
+    finished,
+
+    // fn init(fd_idx: u32, data: []u8)
+};
+
 const Client = struct {
     const Self = @This();
 
     const State = union(enum) {
         start,
         socket: struct { io: net.Socket, start_t: Instant },
-        connect: struct { io: net.Connect, start_t: Instant },
-        pingpong: struct {},
-        close: struct {},
+        connect: struct { fd_idx: u32, io: net.Connect, start_t: Instant },
+        pingpong: struct {
+            inner: PingPong,
+            counter: u8,
+        },
+        close: net.Close,
     };
+
+    state: State,
+    data: []u64,
+
+    fn init(alloc: Allocator) Self {}
+
+    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(void) {}
+
+    fn poll_fn(ptr: *anyopaque, ctx: *const csio.Context) csio.Poll(void) {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        return self.poll(ctx);
+    }
+
+    fn task(self: *Self) csio.Task {
+        return .{
+            .ptr = self,
+            .poll_fn = Self.poll_fn,
+        };
+    }
 };
 
 const RunServer = struct {};
-
-const HandlePingPong = struct {};
 
 const SetupServer = struct {
     const Self = @This();
@@ -186,7 +231,7 @@ const SetupServer = struct {
                             self.state = .{
                                 .listen = .{
                                     .start_t = now,
-                                    .io = net.Listen.init(.{ .fixed = s.fd_idx }, 32),
+                                    .io = net.Listen.init(.{ .fixed = s.fd_idx }, NUM_CLIENTS),
                                     .fd_idx = s.fd_idx,
                                 },
                             };
