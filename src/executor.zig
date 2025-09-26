@@ -160,6 +160,7 @@ pub const Executor = struct {
                     .task_entry = entry,
                     .direct_io_alloc = &self.direct_io_alloc,
                     .fixed_fd = self.fixed_fd,
+                    .tasks = self.tasks,
                 });
                 switch (poll_res) {
                     .ready => {

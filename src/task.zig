@@ -16,6 +16,15 @@ pub const TaskEntry = struct {
     finished_io: [MAX_IO_PER_TASK]linux.io_uring_cqe,
     num_finished_io: u8,
     num_pending_io: u8,
+
+    pub fn init(task: Task) TaskEntry {
+        return .{
+            .task = task,
+            .finished_io = undefined,
+            .num_finished_io = 0,
+            .num_pending_io = 0,
+        };
+    }
 };
 
 pub const Context = struct {
@@ -35,6 +44,13 @@ pub const Context = struct {
 
     preempt_duration_ns: u64,
     direct_io_alloc: *IoAlloc,
+
+    tasks: Slab(TaskEntry),
+
+    pub fn spawn(self: *const Context, task: Task) void {
+        const task_id = self.tasks.insert(TaskEntry.init(task)) catch unreachable;
+        _ = self.to_notify.insert(task_id, {}) catch unreachable;
+    }
 
     pub fn yield_if_needed(self: *const Context) bool {
         const now = Instant.now() catch unreachable;
