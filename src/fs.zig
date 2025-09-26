@@ -8,6 +8,8 @@ const Result = task_mod.Result;
 const Fd = task_mod.Fd;
 const IoOp = task_mod.IoOp;
 
+pub const Close = task_mod.Close;
+
 pub fn align_forward(addr: usize, alignment: usize) usize {
     return (addr +% alignment -% 1) & ~(alignment -% 1);
 }
@@ -281,35 +283,6 @@ pub const Open = struct {
                 switch (res) {
                     .ok => |r| {
                         return .{ .ready = .{ .ok = @intCast(r) } };
-                    },
-                    .err => |e| {
-                        return .{ .ready = .{ .err = e } };
-                    },
-                }
-            },
-            .pending => return .pending,
-        }
-    }
-};
-
-pub const Close = struct {
-    op: IoOp,
-
-    pub fn init(fd: linux.fd_t) Close {
-        var sqe = std.mem.zeroes(linux.io_uring_sqe);
-        sqe.prep_close(fd);
-        return .{
-            .op = IoOp.init(sqe),
-        };
-    }
-
-    pub fn poll(self: *Close, ctx: *const Context) Poll(Result(void, linux.E)) {
-        switch (self.op.poll(ctx)) {
-            .ready => |res| {
-                switch (res) {
-                    .ok => |r| {
-                        std.debug.assert(r == 0);
-                        return .{ .ready = .{ .ok = {} } };
                     },
                     .err => |e| {
                         return .{ .ready = .{ .err = e } };

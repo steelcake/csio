@@ -204,7 +204,6 @@ const Read = struct {
                     }
                 },
                 .read => |*r| {
-                    const startt = Instant.now() catch unreachable;
                     var pending: u32 = 0;
                     io: for (0..CONCURRENCY) |idx| {
                         if (ctx.yield_if_needed()) {
@@ -265,8 +264,6 @@ const Read = struct {
                         const fd = ctx.unregister_fd(r.fd_idx);
                         self.state = .{ .close = .{ .io = fs.Close.init(fd), .start_t = now } };
                     } else {
-                        const now = Instant.now() catch unreachable;
-                        std.log.info("TOOK {}us", .{ now.since(startt) / 1000 });
                         return .pending;
                     }
                 },

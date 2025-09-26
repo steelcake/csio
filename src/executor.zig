@@ -70,14 +70,16 @@ pub const Executor = struct {
             .alloc = params.alloc,
         });
 
-        polled_io_ring.ring.register_buffers(&.{
-            std.posix.iovec{
-                .base = params.direct_io_alloc_buf.ptr,
-                .len = params.direct_io_alloc_buf.len,
-            },
-        }) catch {
-            return error.RegisterBuffersFail;
-        };
+        if (params.direct_io_alloc_buf.len > 0) {
+            polled_io_ring.ring.register_buffers(&.{
+                std.posix.iovec{
+                    .base = params.direct_io_alloc_buf.ptr,
+                    .len = params.direct_io_alloc_buf.len,
+                },
+            }) catch {
+                return error.RegisterBuffersFail;
+            };
+        }
 
         const io = try Slab(u64).init(max_io, params.alloc);
         const tasks = try Slab(TaskEntry).init(params.max_num_tasks, params.alloc);
@@ -144,7 +146,6 @@ pub const Executor = struct {
             // Run tasks
             while (self.to_notify.swap_remove(0)) |task_id_entry| {
                 const task_id = task_id_entry.key;
-                // it is illegal to notify finished tasks
                 const entry = self.tasks.get_mut_ref(task_id) orelse unreachable;
 
                 const start = Instant.now() catch unreachable;
@@ -167,6 +168,7 @@ pub const Executor = struct {
                         std.debug.assert(entry.num_finished_io == 0);
                         std.debug.assert(entry.num_pending_io == 0);
                         _ = self.tasks.remove(task_id) orelse unreachable;
+                        _ = self.to_notify.remove(task_id);
                     },
                     .pending => {},
                 }

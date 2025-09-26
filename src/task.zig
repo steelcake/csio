@@ -226,3 +226,32 @@ pub const Task = struct {
         return self.poll_fn(self.ptr, ctx);
     }
 };
+
+pub const Close = struct {
+    op: IoOp,
+
+    pub fn init(fd: linux.fd_t) Close {
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        sqe.prep_close(fd);
+        return .{
+            .op = IoOp.init(sqe),
+        };
+    }
+
+    pub fn poll(self: *Close, ctx: *const Context) Poll(Result(void, linux.E)) {
+        switch (self.op.poll(ctx)) {
+            .ready => |res| {
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
+                        return .{ .ready = .{ .ok = {} } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
+            },
+            .pending => return .pending,
+        }
+    }
+};

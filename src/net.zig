@@ -8,12 +8,14 @@ const Result = task_mod.Result;
 const Fd = task_mod.Fd;
 const IoOp = task_mod.IoOp;
 
+pub const Close = task_mod.Close;
+
 pub const Socket = struct {
     op: IoOp,
 
-    pub fn init(domain: i32, socket_type: i32, protocol: i32) Socket {
+    pub fn init(domain: u32, socket_type: u32, protocol: u32) Socket {
         var sqe = std.mem.zeroes(linux.io_uring_sqe);
-        sqe.prep_socket(domain, socket_type, protocol);
+        sqe.prep_socket(domain, socket_type, protocol, 0);
         const op = IoOp.init(sqe);
         return .{
             .op = op,
@@ -23,8 +25,15 @@ pub const Socket = struct {
     pub fn poll(self: *Socket, ctx: *const Context) Poll(Result(linux.fd_t, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                std.debug.assert(res >= 0);
-                return .{ .ready = .{ .ok = @intCast(res) } };
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r >= 0);
+                        return .{ .ready = .{ .ok = @intCast(r) } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
             },
             .pending => return .pending,
         }
@@ -53,8 +62,15 @@ pub const Bind = struct {
     pub fn poll(self: *Bind, ctx: *const Context) Poll(Result(void, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                std.debug.assert(res == 0);
-                return .{ .ready = .{ .ok = {} } };
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
+                        return .{ .ready = .{ .ok = {} } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
             },
             .pending => return .pending,
         }
@@ -84,8 +100,15 @@ pub const Listen = struct {
     pub fn poll(self: *Listen, ctx: *const Context) Poll(Result(void, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                std.debug.assert(res == 0);
-                return .{ .ready = .{ .ok = {} } };
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
+                        return .{ .ready = .{ .ok = {} } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
             },
             .pending => return .pending,
         }
@@ -115,8 +138,15 @@ pub const Connect = struct {
     pub fn poll(self: *Connect, ctx: *const Context) Poll(Result(void, linux.E)) {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
-                std.debug.assert(res == 0);
-                return .{ .ready = .{ .ok = {} } };
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
+                        return .{ .ready = .{ .ok = {} } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
             },
             .pending => return .pending,
         }
@@ -213,9 +243,9 @@ pub const Accept = struct {
         switch (self.op.poll(ctx)) {
             .ready => |res| {
                 switch (res) {
-                    .ok => {
-                        std.debug.assert(res >= 0);
-                        return .{ .ready = .{ .ok = @intCast(res) } };
+                    .ok => |r| {
+                        std.debug.assert(r >= 0);
+                        return .{ .ready = .{ .ok = @intCast(r) } };
                     },
                     .err => |e| {
                         return .{ .ready = .{ .err = e } };

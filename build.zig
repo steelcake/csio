@@ -34,19 +34,27 @@ pub fn build(b: *std.Build) void {
     const fuzz_step = b.step("fuzz", "run fuzz tests");
     fuzz_step.dependOn(&run_fuzz.step);
 
-    const direct_io = b.addExecutable(.{
-        .name = "direct_io",
+    const Example = enum {
+        direct_io,
+        tcp,
+        unknown,
+    };
+    const example_option = b.option(Example, "example", "Example to run, default is direct_io") orelse Example.direct_io;
+    const example_step = b.step("example", "Run example");
+    const example = b.addExecutable(.{
+        .name = b.fmt("{s}_example", .{@tagName(example_option)}),
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/direct_io.zig"),
+            .root_source_file = b.path(
+                b.fmt("examples/{s}.zig", .{@tagName(example_option)}),
+            ),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "csio", .module = mod },
+            },
         }),
     });
-    direct_io.root_module.addImport("csio", mod);
 
-    const run_direct_io = b.addRunArtifact(direct_io);
-
-    const direct_io_step = b.step("direct_io", "run direct_io example");
-    direct_io_step.dependOn(&run_direct_io.step);
+    const example_run = b.addRunArtifact(example);
+    example_step.dependOn(&example_run.step);
 }
-
