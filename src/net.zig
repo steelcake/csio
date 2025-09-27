@@ -40,13 +40,42 @@ pub const Socket = struct {
     }
 };
 
-// pub const SetSockOpt = struct {
-//     op: IoOp,
+pub const SetSockOpt = struct {
+    op: IoOp,
 
-//     pub fn init(fd: Fd, level: i32, optname: i32, optval: *anytype, ) SetSockOpt {
+    pub fn init(fd: Fd, level: i32, optname: i32, optval: *const anyopaque, optlen: linux.socklen_t) SetSockOpt {
+        var sqe = std.mem.zeroes(linux.io_uring_sqe);
+        switch (fd) {
+            .fd => |f| {
+                sqe.prep_cmd_sock(linux.IO_URING_SOCKET_OP.SETSOCKOPT, f, @bitCast(level), @bitCast(optname), @intFromPtr(optval), optlen);
+            },
+            .fixed => |idx| {
+                sqe.prep_cmd_sock(linux.IO_URING_SOCKET_OP.SETSOCKOPT, @intCast(idx), @bitCast(level), @bitCast(optname), @intFromPtr(optval), optlen);
+                sqe.flags |= linux.IOSQE_FIXED_FILE;
+            },
+        }
+        return .{
+            .op = IoOp.init(sqe),
+        };
+    }
 
-//     }
-// };
+    pub fn poll(self: *SetSockOpt, ctx: *const Context) Poll(Result(void, linux.E)) {
+        switch (self.op.poll(ctx)) {
+            .ready => |res| {
+                switch (res) {
+                    .ok => |r| {
+                        std.debug.assert(r == 0);
+                        return .{ .ready = .{ .ok = {} } };
+                    },
+                    .err => |e| {
+                        return .{ .ready = .{ .err = e } };
+                    },
+                }
+            },
+            .pending => return .pending,
+        }
+    }
+};
 
 pub const Bind = struct {
     op: IoOp,

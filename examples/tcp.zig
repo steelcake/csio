@@ -9,8 +9,8 @@ const net = csio.net;
 pub const log_level: std.log.Level = .debug;
 
 const PORT = 1131;
-const NUM_CLIENTS = 16;
-const MESSAGES_PER_CLIENT = 1 << 14;
+const NUM_CLIENTS = 32;
+const MESSAGES_PER_CLIENT = 1 << 10;
 const MESSAGE_SIZE = 1 << 15;
 
 pub fn main() !void {
@@ -544,9 +544,26 @@ const SetupServer = struct {
 
     const State = union(enum) {
         start,
-        socket: struct { io: net.Socket, start_t: Instant },
-        bind: struct { io: net.Bind, fd_idx: u32, start_t: Instant, addr: *std.net.Address },
-        listen: struct { io: net.Listen, fd_idx: u32, start_t: Instant },
+        socket: struct {
+            io: net.Socket,
+            start_t: Instant,
+        },
+        setsockopt: struct {
+            io: net.SetSockOpt,
+            fd_idx: u32,
+            start_t: Instant,
+        },
+        bind: struct {
+            io: net.Bind,
+            fd_idx: u32,
+            start_t: Instant,
+            addr: *std.net.Address,
+        },
+        listen: struct {
+            io: net.Listen,
+            fd_idx: u32,
+            start_t: Instant,
+        },
         finished,
     };
 
@@ -579,8 +596,33 @@ const SetupServer = struct {
 
                             std.log.info("created socket in {}us", .{now.since(s.start_t) / 1000});
 
+                            self.state = .{
+                                .setsockopt = .{
+                                    .start_t = now,
+                                    .io = net.SetSockOpt.init(.{ .fixed = fd_idx }, linux.SOL.SOCKET, linux.SO.REUSEPORT, &@as(i32, 1), 4),
+                                    .fd_idx = fd_idx,
+                                },
+                            };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .setsockopt => |*s| {
+                    switch (s.io.poll(ctx)) {
+                        .ready => |res| {
+                            switch (res) {
+                                .ok => {},
+                                .err => |e| std.debug.panic("failed to setsockopt: {}", .{e}),
+                            }
+
+                            const now = Instant.now() catch unreachable;
+
+                            std.log.info("setsockopt in {}us", .{now.since(s.start_t) / 1000});
+
                             const addr = alloc.create(std.net.Address) catch unreachable;
                             addr.* = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, PORT);
+
+                            const fd_idx = s.fd_idx;
 
                             self.state = .{
                                 .bind = .{
