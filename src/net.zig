@@ -40,6 +40,14 @@ pub const Socket = struct {
     }
 };
 
+// pub const SetSockOpt = struct {
+//     op: IoOp,
+
+//     pub fn init(fd: Fd, level: i32, optname: i32, optval: *anytype, ) SetSockOpt {
+
+//     }
+// };
+
 pub const Bind = struct {
     op: IoOp,
 

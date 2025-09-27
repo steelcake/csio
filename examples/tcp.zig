@@ -9,8 +9,8 @@ const net = csio.net;
 pub const log_level: std.log.Level = .debug;
 
 const PORT = 1131;
-const NUM_CLIENTS = 64;
-const MESSAGES_PER_CLIENT = 1 << 20;
+const NUM_CLIENTS = 16;
+const MESSAGES_PER_CLIENT = 1 << 14;
 const MESSAGE_SIZE = 1 << 15;
 
 pub fn main() !void {
@@ -41,7 +41,7 @@ const MainTask = struct {
         run_server: struct {
             inner: RunServer,
             server_fd_idx: u32,
-            clients: []Client,
+            start_t: Instant,
         },
         close_server: net.Close,
         finished,
@@ -86,16 +86,29 @@ const MainTask = struct {
 
                     self.state = .{
                         .run_server = .{
-                            .clients = clients,
                             .server_fd_idx = server_fd_idx,
                             .inner = RunServer.init(server_fd_idx),
+                            .start_t = Instant.now() catch unreachable,
                         },
                     };
                 },
                 .run_server => |*s| {
                     switch (s.inner.poll(ctx, self.alloc)) {
                         .ready => {
-                            self.alloc.free(s.clients);
+                            const now = Instant.now() catch unreachable;
+                            const elapsed = now.since(s.start_t) / 1000;
+
+                            std.log.info("finished server work in {}us", .{elapsed});
+
+                            const elapsed_secs = @as(f64, @floatFromInt(elapsed)) / 1000.0 / 1000.0;
+
+                            const total_bytes = NUM_CLIENTS * MESSAGE_SIZE * MESSAGES_PER_CLIENT;
+                            const total_gb = @as(f64, @floatFromInt(total_bytes)) / @as(f64, @floatFromInt(1 << 30));
+
+                            const bw: f64 = total_gb / elapsed_secs * 8.0 * 2.0;
+
+                            std.log.info("bandwidth: {d:.3}Gbit/s", .{bw});
+
                             const fd = ctx.unregister_fd(s.server_fd_idx);
                             self.state = .{
                                 .close_server = net.Close.init(fd),
@@ -223,12 +236,9 @@ const Client = struct {
     alloc: Allocator,
 
     fn init(alloc: Allocator) Self {
-        const data = alloc.alloc(u8, MESSAGE_SIZE) catch unreachable;
-        fill_data(data, 0);
-
         return .{
             .state = .start,
-            .data = data,
+            .data = undefined,
             .alloc = alloc,
         };
     }
@@ -237,6 +247,9 @@ const Client = struct {
         while (true) {
             switch (self.state) {
                 .start => {
+                    const data = self.alloc.alloc(u8, MESSAGE_SIZE) catch unreachable;
+                    fill_data(data, 0);
+                    self.data = data;
                     self.state = .{
                         .socket = .{
                             .io = net.Socket.init(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0),
@@ -328,6 +341,7 @@ const Client = struct {
                             }
 
                             self.state = .finished;
+                            return .ready;
                         },
                         .pending => return .pending,
                     }
@@ -366,20 +380,20 @@ const ServerPingPong = struct {
     state: State,
     buf: []u8,
 
-    fn init(conn_fd_idx: u32, alloc: Allocator) Self {
-        const buf = alloc.alloc(u8, MESSAGE_SIZE) catch unreachable;
+    fn init(conn_fd_idx: u32) Self {
         return .{
             .state = .start,
             .counter = 0,
             .conn_fd_idx = conn_fd_idx,
-            .buf = buf,
+            .buf = undefined,
         };
     }
 
-    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(void) {
+    fn poll(self: *Self, ctx: *const csio.Context, alloc: Allocator) csio.Poll(void) {
         while (true) {
             switch (self.state) {
                 .start => {
+                    self.buf = alloc.alloc(u8, MESSAGE_SIZE) catch unreachable;
                     self.state = .{
                         .recv = net.RecvExact.init(.{ .fixed = self.conn_fd_idx }, self.buf, 0),
                     };
@@ -476,7 +490,7 @@ const RunServer = struct {
                 .running => |*s| {
                     var idx: u32 = 0;
                     while (idx < s.num_active) {
-                        switch (s.pingpong[idx].poll(ctx)) {
+                        switch (s.pingpong[idx].poll(ctx, alloc)) {
                             .ready => {
                                 s.num_active -= 1;
                                 s.num_finished += 1;
@@ -496,7 +510,8 @@ const RunServer = struct {
                                     .err => |e| std.debug.panic("failed to accept connection: {}", .{e}),
                                 };
 
-                                s.pingpong[s.num_active] = ServerPingPong.init(conn_fd_idx, alloc);
+                                s.pingpong[s.num_active] = ServerPingPong.init(conn_fd_idx);
+                                std.debug.assert(s.pingpong[s.num_active].poll(ctx, alloc) == .pending);
                                 s.num_active += 1;
 
                                 if (s.num_active + s.num_finished < NUM_CLIENTS) {
