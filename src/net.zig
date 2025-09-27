@@ -43,14 +43,14 @@ pub const Socket = struct {
 pub const Bind = struct {
     op: IoOp,
 
-    pub fn init(fd: Fd, addr: *const linux.sockaddr, addr_len: u32, flags: u32) Bind {
+    pub fn init(fd: Fd, addr: *const linux.sockaddr, addr_len: u32, flags: i32) Bind {
         var sqe = std.mem.zeroes(linux.io_uring_sqe);
         switch (fd) {
             .fd => |f| {
-                sqe.prep_bind(f, addr, addr_len, flags);
+                sqe.prep_bind(f, addr, addr_len, @bitCast(flags));
             },
             .fixed => |idx| {
-                sqe.prep_bind(@intCast(idx), addr, addr_len, flags);
+                sqe.prep_bind(@intCast(idx), addr, addr_len, @bitCast(flags));
                 sqe.flags |= linux.IOSQE_FIXED_FILE;
             },
         }
@@ -160,10 +160,10 @@ pub const Recv = struct {
         var sqe = std.mem.zeroes(linux.io_uring_sqe);
         switch (fd) {
             .fd => |f| {
-                sqe.prep_recv(f, buf, flags);
+                sqe.prep_recv(f, buf, @bitCast(flags));
             },
             .fixed => |idx| {
-                sqe.prep_recv(@intCast(idx), buf, flags);
+                sqe.prep_recv(@intCast(idx), buf, @bitCast(flags));
                 sqe.flags |= linux.IOSQE_FIXED_FILE;
             },
         }
@@ -193,10 +193,10 @@ pub const Send = struct {
         var sqe = std.mem.zeroes(linux.io_uring_sqe);
         switch (fd) {
             .fd => |f| {
-                sqe.prep_send(f, buf, flags);
+                sqe.prep_send(f, buf, @bitCast(flags));
             },
             .fixed => |idx| {
-                sqe.prep_send(@intCast(idx), buf, flags);
+                sqe.prep_send(@intCast(idx), buf, @bitCast(flags));
                 sqe.flags |= linux.IOSQE_FIXED_FILE;
             },
         }
@@ -222,14 +222,14 @@ pub const Send = struct {
 pub const Accept = struct {
     op: IoOp,
 
-    pub fn init(fd: Fd, addr: ?*const linux.sockaddr, addr_len: ?u32, flags: u32) Accept {
+    pub fn init(fd: Fd, addr: ?*linux.sockaddr, addr_len: ?*u32, flags: i32) Accept {
         var sqe = std.mem.zeroes(linux.io_uring_sqe);
         switch (fd) {
             .fd => |f| {
-                sqe.prep_accept(f, addr, addr_len, flags);
+                sqe.prep_accept(f, addr, addr_len, @bitCast(flags));
             },
             .fixed => |idx| {
-                sqe.prep_accept(@intCast(idx), addr, addr_len, flags);
+                sqe.prep_accept(@intCast(idx), addr, addr_len, @bitCast(flags));
                 sqe.flags |= linux.IOSQE_FIXED_FILE;
             },
         }
@@ -304,7 +304,9 @@ fn Exact(comptime Op: type) type {
                                     .ok => |r| {
                                         self.buf = self.buf[r..];
                                         if (self.buf.len > 0) {
-                                            self.send = Op.init(self.fd, self.buf, self.flags);
+                                            self.state = .{
+                                                .op = Op.init(self.fd, self.buf, self.flags),
+                                            };
                                         } else {
                                             self.state = .finished;
                                             return .{ .ready = .{ .ok = {} } };

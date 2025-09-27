@@ -45,7 +45,7 @@ pub const Context = struct {
     preempt_duration_ns: u64,
     direct_io_alloc: *IoAlloc,
 
-    tasks: Slab(TaskEntry),
+    tasks: *Slab(TaskEntry),
 
     pub fn spawn(self: *const Context, task: Task) void {
         const task_id = self.tasks.insert(TaskEntry.init(task)) catch unreachable;

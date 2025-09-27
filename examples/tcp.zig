@@ -78,7 +78,7 @@ const MainTask = struct {
                 .start_clients => |*s| {
                     const clients = self.alloc.alloc(Client, NUM_CLIENTS) catch unreachable;
                     for (clients) |*c| {
-                        c.* = Client.init();
+                        c.* = Client.init(self.alloc);
                         ctx.spawn(c.task());
                     }
 
@@ -220,6 +220,7 @@ const Client = struct {
 
     state: State,
     data: []u8,
+    alloc: Allocator,
 
     fn init(alloc: Allocator) Self {
         const data = alloc.alloc(u8, MESSAGE_SIZE) catch unreachable;
@@ -228,10 +229,11 @@ const Client = struct {
         return .{
             .state = .start,
             .data = data,
+            .alloc = alloc,
         };
     }
 
-    fn poll(self: *Self, ctx: *const csio.Context, alloc: Allocator) csio.Poll(void) {
+    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(void) {
         while (true) {
             switch (self.state) {
                 .start => {
@@ -254,7 +256,7 @@ const Client = struct {
 
                             std.log.info("created socket for client in {}us", .{now.since(s.start_t) / 1000});
 
-                            const addr = alloc.create(std.net.Address) catch unreachable;
+                            const addr = self.alloc.create(std.net.Address) catch unreachable;
                             addr.* = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, PORT);
 
                             self.state = .{
@@ -274,7 +276,7 @@ const Client = struct {
                         .ready => |res| {
                             const now = Instant.now() catch unreachable;
 
-                            alloc.destroy(s.addr);
+                            self.alloc.destroy(s.addr);
                             switch (res) {
                                 .ok => {},
                                 .err => |e| std.debug.panic("failed to bind: {}", .{e}),
@@ -388,7 +390,7 @@ const ServerPingPong = struct {
                             check_data(self.buf, self.counter);
 
                             self.state = .{
-                                .recv = net.SendExact.init(.{ .fixed = self.conn_fd_idx }, self.buf, 0),
+                                .send = net.SendExact.init(.{ .fixed = self.conn_fd_idx }, self.buf, 0),
                             };
                         },
                         .pending => return .pending,
@@ -448,7 +450,7 @@ const RunServer = struct {
 
     state: State,
     server_fd_idx: u32,
-    accept: net.Accept,
+    accept: ?net.Accept,
 
     fn init(server_fd_idx: u32) Self {
         return .{
@@ -459,38 +461,65 @@ const RunServer = struct {
     }
 
     fn poll(self: *Self, ctx: *const csio.Context, alloc: Allocator) csio.Poll(void) {
-        switch (self.state) {
-            .start => {
-                const pp = alloc.alloc(ServerPingPong, NUM_CLIENTS) catch unreachable;
-                self.state = .{
-                    .running = .{
-                        .pingpong = pp,
-                        .num_active = 0,
-                        .num_finished = 0,
-                    },
-                };
-            },
-            .running => |*s| {
-                var idx: u32 = 0;
-                while (idx < s.num_active) {
-                    switch (s.pingpong[idx].poll(ctx)) {
-                        .ready => {
-                            s.num_active -= 1;
-                            s.num_finished += 1;
-                            s.pingpong[idx] = s.pingpong[s.num_active];
+        while (true) {
+            switch (self.state) {
+                .start => {
+                    const pp = alloc.alloc(ServerPingPong, NUM_CLIENTS) catch unreachable;
+                    self.state = .{
+                        .running = .{
+                            .pingpong = pp,
+                            .num_active = 0,
+                            .num_finished = 0,
                         },
-                        .pending => {
-                            idx += 1;
-                        },
+                    };
+                },
+                .running => |*s| {
+                    var idx: u32 = 0;
+                    while (idx < s.num_active) {
+                        switch (s.pingpong[idx].poll(ctx)) {
+                            .ready => {
+                                s.num_active -= 1;
+                                s.num_finished += 1;
+                                s.pingpong[idx] = s.pingpong[s.num_active];
+                            },
+                            .pending => {
+                                idx += 1;
+                            },
+                        }
                     }
-                }
 
-                switch (self.accept.poll(ctx)) {
-                    .ready => |res| {},
-                    .pending => {},
-                }
-            },
-            .finished => unreachable,
+                    if (self.accept) |*accept_f| {
+                        switch (accept_f.poll(ctx)) {
+                            .ready => |res| {
+                                const conn_fd_idx = switch (res) {
+                                    .ok => |fd| ctx.register_fd(fd),
+                                    .err => |e| std.debug.panic("failed to accept connection: {}", .{e}),
+                                };
+
+                                s.pingpong[s.num_active] = ServerPingPong.init(conn_fd_idx, alloc);
+                                s.num_active += 1;
+
+                                if (s.num_active + s.num_finished < NUM_CLIENTS) {
+                                    self.accept = net.Accept.init(.{ .fixed = self.server_fd_idx }, null, null, 0);
+                                } else {
+                                    self.accept = null;
+                                }
+                            },
+                            .pending => {},
+                        }
+                    }
+
+                    if (s.num_finished == NUM_CLIENTS) {
+                        std.debug.assert(s.num_active == 0);
+                        std.debug.assert(self.accept == null);
+                        self.state = .finished;
+                        return .ready;
+                    } else {
+                        return .pending;
+                    }
+                },
+                .finished => unreachable,
+            }
         }
     }
 };
@@ -600,7 +629,7 @@ const SetupServer = struct {
 
 fn fill_data(data: []u8, counter: u32) void {
     std.debug.assert(data.len == MESSAGE_SIZE);
-    var v = counter *% MESSAGE_SIZE;
+    var v: u8 = @truncate(counter *% MESSAGE_SIZE);
     for (0..MESSAGE_SIZE) |idx| {
         data.ptr[idx] = v;
         v +%= 1;
@@ -609,7 +638,7 @@ fn fill_data(data: []u8, counter: u32) void {
 
 fn check_data(data: []const u8, counter: u32) void {
     std.debug.assert(data.len == MESSAGE_SIZE);
-    var v = counter *% MESSAGE_SIZE;
+    var v: u8 = @truncate(counter *% MESSAGE_SIZE);
     for (0..MESSAGE_SIZE) |idx| {
         std.debug.assert(data.ptr[idx] == v);
         v +%= 1;
