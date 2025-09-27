@@ -11,7 +11,7 @@ pub const log_level: std.log.Level = .debug;
 const PORT = 1131;
 const NUM_CLIENTS = 64;
 const MESSAGES_PER_CLIENT = 1 << 20;
-const MESSAGE_SIZE = 1024;
+const MESSAGE_SIZE = 1 << 15;
 
 pub fn main() !void {
     const mem = try std.heap.page_allocator.alloc(u8, 1 << 30);
@@ -38,7 +38,11 @@ const MainTask = struct {
         start,
         setup_server: SetupServer,
         start_clients: struct { server_fd_idx: u32 },
-        run_server: struct { inner: RunServer, server_fd_idx: u32, clients: []Client },
+        run_server: struct {
+            inner: RunServer,
+            server_fd_idx: u32,
+            clients: []Client,
+        },
         close_server: net.Close,
         finished,
     };
@@ -78,13 +82,27 @@ const MainTask = struct {
                         ctx.spawn(c.task());
                     }
 
-                    self.state = .run_server;
+                    const server_fd_idx = s.server_fd_idx;
+
+                    self.state = .{
+                        .run_server = .{
+                            .clients = clients,
+                            .server_fd_idx = server_fd_idx,
+                            .inner = RunServer.init(server_fd_idx),
+                        },
+                    };
                 },
                 .run_server => |*s| {
-                    const fd = ctx.unregister_fd(fd_idx);
-                    self.state = .{
-                        .close_server = net.Close.init(fd),
-                    };
+                    switch (s.inner.poll(ctx, self.alloc)) {
+                        .ready => {
+                            self.alloc.free(s.clients);
+                            const fd = ctx.unregister_fd(s.server_fd_idx);
+                            self.state = .{
+                                .close_server = net.Close.init(fd),
+                            };
+                        },
+                        .pending => return .pending,
+                    }
                 },
                 .close_server => |*f| {
                     switch (f.poll(ctx)) {
@@ -202,22 +220,6 @@ const Client = struct {
 
     state: State,
     data: []u8,
-
-    fn fill_data(data: []u8, counter: u32) void {
-        var v = counter *% MESSAGE_SIZE;
-        for (0..MESSAGE_SIZE) |idx| {
-            data.ptr[idx] = v;
-            v +%= 1;
-        }
-    }
-
-    fn check_data(data: []const u8, counter: u32) void {
-        var v = counter *% MESSAGE_SIZE;
-        for (0..MESSAGE_SIZE) |idx| {
-            std.debug.assert(data.ptr[idx] == v);
-            v +%= 1;
-        }
-    }
 
     fn init(alloc: Allocator) Self {
         const data = alloc.alloc(u8, MESSAGE_SIZE) catch unreachable;
@@ -346,9 +348,152 @@ const Client = struct {
     }
 };
 
-const ServerPingPong = struct {};
+const ServerPingPong = struct {
+    const Self = @This();
 
-const RunServer = struct {};
+    const State = union(enum) {
+        start,
+        recv: net.RecvExact,
+        send: net.SendExact,
+        close: net.Close,
+        finished,
+    };
+
+    counter: u32,
+    conn_fd_idx: u32,
+    state: State,
+    buf: []u8,
+
+    fn init(conn_fd_idx: u32, alloc: Allocator) Self {
+        const buf = alloc.alloc(u8, MESSAGE_SIZE) catch unreachable;
+        return .{
+            .state = .start,
+            .counter = 0,
+            .conn_fd_idx = conn_fd_idx,
+            .buf = buf,
+        };
+    }
+
+    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(void) {
+        while (true) {
+            switch (self.state) {
+                .start => {
+                    self.state = .{
+                        .recv = net.RecvExact.init(.{ .fixed = self.conn_fd_idx }, self.buf, 0),
+                    };
+                },
+                .recv => |*f| {
+                    switch (f.poll(ctx)) {
+                        .ready => {
+                            check_data(self.buf, self.counter);
+
+                            self.state = .{
+                                .recv = net.SendExact.init(.{ .fixed = self.conn_fd_idx }, self.buf, 0),
+                            };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .send => |*f| {
+                    switch (f.poll(ctx)) {
+                        .ready => {
+                            if (self.counter < MESSAGES_PER_CLIENT) {
+                                self.counter += 1;
+
+                                self.state = .{
+                                    .recv = net.RecvExact.init(.{ .fixed = self.conn_fd_idx }, self.buf, 0),
+                                };
+                            } else {
+                                const fd = ctx.unregister_fd(self.conn_fd_idx);
+                                self.state = .{
+                                    .close = net.Close.init(fd),
+                                };
+                            }
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .close => |*f| {
+                    switch (f.poll(ctx)) {
+                        .ready => |res| {
+                            switch (res) {
+                                .ok => {},
+                                .err => |e| std.debug.panic("failed to close conn socket: {}", .{e}),
+                            }
+
+                            self.state = .finished;
+                            return .{ .ready = {} };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .finished => unreachable,
+            }
+        }
+    }
+};
+
+const RunServer = struct {
+    const Self = @This();
+
+    const State = union(enum) {
+        start,
+        running: struct {
+            pingpong: []ServerPingPong,
+            num_active: u32,
+            num_finished: u32,
+        },
+        finished,
+    };
+
+    state: State,
+    server_fd_idx: u32,
+    accept: net.Accept,
+
+    fn init(server_fd_idx: u32) Self {
+        return .{
+            .server_fd_idx = server_fd_idx,
+            .state = .start,
+            .accept = net.Accept.init(.{ .fixed = server_fd_idx }, null, null, 0),
+        };
+    }
+
+    fn poll(self: *Self, ctx: *const csio.Context, alloc: Allocator) csio.Poll(void) {
+        switch (self.state) {
+            .start => {
+                const pp = alloc.alloc(ServerPingPong, NUM_CLIENTS) catch unreachable;
+                self.state = .{
+                    .running = .{
+                        .pingpong = pp,
+                        .num_active = 0,
+                        .num_finished = 0,
+                    },
+                };
+            },
+            .running => |*s| {
+                var idx: u32 = 0;
+                while (idx < s.num_active) {
+                    switch (s.pingpong[idx].poll(ctx)) {
+                        .ready => {
+                            s.num_active -= 1;
+                            s.num_finished += 1;
+                            s.pingpong[idx] = s.pingpong[s.num_active];
+                        },
+                        .pending => {
+                            idx += 1;
+                        },
+                    }
+                }
+
+                switch (self.accept.poll(ctx)) {
+                    .ready => |res| {},
+                    .pending => {},
+                }
+            },
+            .finished => unreachable,
+        }
+    }
+};
 
 const SetupServer = struct {
     const Self = @This();
@@ -452,3 +597,21 @@ const SetupServer = struct {
         }
     }
 };
+
+fn fill_data(data: []u8, counter: u32) void {
+    std.debug.assert(data.len == MESSAGE_SIZE);
+    var v = counter *% MESSAGE_SIZE;
+    for (0..MESSAGE_SIZE) |idx| {
+        data.ptr[idx] = v;
+        v +%= 1;
+    }
+}
+
+fn check_data(data: []const u8, counter: u32) void {
+    std.debug.assert(data.len == MESSAGE_SIZE);
+    var v = counter *% MESSAGE_SIZE;
+    for (0..MESSAGE_SIZE) |idx| {
+        std.debug.assert(data.ptr[idx] == v);
+        v +%= 1;
+    }
+}
