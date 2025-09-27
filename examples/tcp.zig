@@ -10,7 +10,7 @@ pub const log_level: std.log.Level = .debug;
 
 const PORT = 1131;
 const NUM_CLIENTS = 64;
-const NUM_PINGPONGS = 1 << 20;
+const MESSAGES_PER_CLIENT = 1 << 20;
 const MESSAGE_SIZE = 1024;
 
 pub fn main() !void {
@@ -113,13 +113,69 @@ const MainTask = struct {
     }
 };
 
-const ClientPingPong = union(enum) {
-    start,
-    send: net.Send,
-    recv: net.Recv,
-    finished,
+const ClientPingPong = struct {
+    const Self = @This();
 
-    // fn init(fd_idx: u32, data: []u8)
+    const State = union(enum) {
+        start,
+        send: net.SendExact,
+        recv: net.RecvExact,
+        finished,
+    };
+
+    data: []u8,
+    fd_idx: u32,
+    state: State,
+
+    fn init(fd_idx: u32, data: []u8) Self {
+        return .{
+            .data = data,
+            .fd_idx = fd_idx,
+            .state = .start,
+        };
+    }
+
+    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(void) {
+        while (true) {
+            switch (self.state) {
+                .start => {
+                    self.state = .{
+                        .send = net.SendExact.init(.{ .fixed = self.fd_idx }, self.data, 0),
+                    };
+                },
+                .send => |*s| {
+                    switch (s.poll(ctx)) {
+                        .ready => |res| {
+                            switch (res) {
+                                .ok => {},
+                                .err => |e| std.debug.panic("failed to send: {}", .{e}),
+                            }
+
+                            self.state = .{
+                                .recv = net.RecvExact.init(.{ .fixed = self.fd_idx }, self.data, 0),
+                            };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .recv => |*s| {
+                    switch (s.poll(ctx)) {
+                        .ready => |res| {
+                            switch (res) {
+                                .ok => {},
+                                .err => |e| std.debug.panic("failed to recv: {}", .{e}),
+                            }
+
+                            self.state = .finished;
+                            return .{ .ready = {} };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .finished => unreachable,
+            }
+        }
+    }
 };
 
 const Client = struct {
@@ -128,20 +184,154 @@ const Client = struct {
     const State = union(enum) {
         start,
         socket: struct { io: net.Socket, start_t: Instant },
-        connect: struct { fd_idx: u32, io: net.Connect, start_t: Instant },
+        connect: struct {
+            fd_idx: u32,
+            io: net.Connect,
+            start_t: Instant,
+            addr: *std.net.Address,
+        },
         pingpong: struct {
-            inner: PingPong,
-            counter: u8,
+            fd_idx: u32,
+            inner: ClientPingPong,
+            counter: u32,
+            start_t: Instant,
         },
         close: net.Close,
+        finished,
     };
 
     state: State,
-    data: []u64,
+    data: []u8,
 
-    fn init(alloc: Allocator) Self {}
+    fn fill_data(data: []u8, counter: u32) void {
+        var v = counter *% MESSAGE_SIZE;
+        for (0..MESSAGE_SIZE) |idx| {
+            data.ptr[idx] = v;
+            v +%= 1;
+        }
+    }
 
-    fn poll(self: *Self, ctx: *const csio.Context) csio.Poll(void) {}
+    fn check_data(data: []const u8, counter: u32) void {
+        var v = counter *% MESSAGE_SIZE;
+        for (0..MESSAGE_SIZE) |idx| {
+            std.debug.assert(data.ptr[idx] == v);
+            v +%= 1;
+        }
+    }
+
+    fn init(alloc: Allocator) Self {
+        const data = alloc.alloc(u8, MESSAGE_SIZE) catch unreachable;
+        fill_data(data, 0);
+
+        return .{
+            .state = .start,
+            .data = data,
+        };
+    }
+
+    fn poll(self: *Self, ctx: *const csio.Context, alloc: Allocator) csio.Poll(void) {
+        while (true) {
+            switch (self.state) {
+                .start => {
+                    self.state = .{
+                        .socket = .{
+                            .io = net.Socket.init(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0),
+                            .start_t = Instant.now() catch unreachable,
+                        },
+                    };
+                },
+                .socket => |*s| {
+                    switch (s.io.poll(ctx)) {
+                        .ready => |res| {
+                            const now = Instant.now() catch unreachable;
+
+                            const fd_idx = switch (res) {
+                                .ok => |fd| ctx.register_fd(fd),
+                                .err => |e| std.debug.panic("failed to create socket for client: {}", .{e}),
+                            };
+
+                            std.log.info("created socket for client in {}us", .{now.since(s.start_t) / 1000});
+
+                            const addr = alloc.create(std.net.Address) catch unreachable;
+                            addr.* = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, PORT);
+
+                            self.state = .{
+                                .connect = .{
+                                    .fd_idx = fd_idx,
+                                    .io = net.Connect.init(.{ .fixed = fd_idx }, &addr.any, addr.getOsSockLen()),
+                                    .start_t = now,
+                                    .addr = addr,
+                                },
+                            };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .connect => |*s| {
+                    switch (s.io.poll(ctx)) {
+                        .ready => |res| {
+                            const now = Instant.now() catch unreachable;
+
+                            alloc.destroy(s.addr);
+                            switch (res) {
+                                .ok => {},
+                                .err => |e| std.debug.panic("failed to bind: {}", .{e}),
+                            }
+
+                            std.log.info("connected client in {}us", .{now.since(s.start_t) / 1000});
+
+                            const fd_idx = s.fd_idx;
+
+                            self.state = .{
+                                .pingpong = .{
+                                    .inner = ClientPingPong.init(fd_idx, self.data),
+                                    .counter = 0,
+                                    .start_t = now,
+                                    .fd_idx = fd_idx,
+                                },
+                            };
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .pingpong => |*s| {
+                    switch (s.inner.poll(ctx)) {
+                        .ready => {
+                            check_data(self.data, s.counter);
+
+                            if (s.counter < MESSAGES_PER_CLIENT) {
+                                s.counter += 1;
+                                fill_data(self.data, s.counter);
+                                s.inner = ClientPingPong.init(s.fd_idx, self.data);
+                            } else {
+                                const now = Instant.now() catch unreachable;
+                                std.log.info("finished client work in {}us", .{now.since(s.start_t) / 1000});
+                                const fd = ctx.unregister_fd(s.fd_idx);
+                                self.state = .{
+                                    .close = net.Close.init(fd),
+                                };
+                            }
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .close => |*s| {
+                    switch (s.poll(ctx)) {
+                        .ready => |res| {
+                            switch (res) {
+                                .ok => {},
+                                .err => |e| std.debug.panic("failed to close client socket: {}", .{e}),
+                            }
+
+                            self.state = .finished;
+                        },
+                        .pending => return .pending,
+                    }
+                },
+                .finished => unreachable,
+            }
+        }
+    }
 
     fn poll_fn(ptr: *anyopaque, ctx: *const csio.Context) csio.Poll(void) {
         const self: *Self = @ptrCast(@alignCast(ptr));
@@ -155,6 +345,8 @@ const Client = struct {
         };
     }
 };
+
+const ServerPingPong = struct {};
 
 const RunServer = struct {};
 
