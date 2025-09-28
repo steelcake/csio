@@ -10,7 +10,7 @@ pub const log_level: std.log.Level = .debug;
 
 const PORT = 1131;
 const NUM_CLIENTS = 32;
-const MESSAGES_PER_CLIENT = 1 << 10;
+const MESSAGES_PER_CLIENT = 1 << 15;
 const MESSAGE_SIZE = 1 << 15;
 
 pub fn main() !void {
@@ -105,7 +105,7 @@ const MainTask = struct {
                             const total_bytes = NUM_CLIENTS * MESSAGE_SIZE * MESSAGES_PER_CLIENT;
                             const total_gb = @as(f64, @floatFromInt(total_bytes)) / @as(f64, @floatFromInt(1 << 30));
 
-                            const bw: f64 = total_gb / elapsed_secs * 8.0 * 2.0;
+                            const bw: f64 = total_gb / elapsed_secs * 8.0 * 4.0;
 
                             std.log.info("bandwidth: {d:.3}Gbit/s", .{bw});
 

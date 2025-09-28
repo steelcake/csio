@@ -45,7 +45,7 @@ pub const Executor = struct {
         direct_io_alloc_buf: []align(IoAlloc.ALIGN) u8,
         wq_fd: ?linux.fd_t,
         alloc: Allocator,
-    }) error{ OutOfMemory, IoUringSetupFail, RegisterBuffersFail }!Self {
+    }) error{ OutOfMemory, IoUringSetupFail }!Self {
         const max_io: u32 = params.max_num_tasks * MAX_IO_PER_TASK;
 
         const direct_io_alloc = try IoAlloc.init(params.direct_io_alloc_buf, params.alloc);
@@ -77,7 +77,7 @@ pub const Executor = struct {
                     .len = params.direct_io_alloc_buf.len,
                 },
             }) catch {
-                return error.RegisterBuffersFail;
+                return error.IoUringSetupFail;
             };
         }
 
