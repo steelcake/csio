@@ -21,16 +21,38 @@ fn overlaps(a: []const u8, b: []const u8) bool {
     return (a_start_addr >= b_start_addr and a_start_addr < b_end_addr) or (b_start_addr >= a_start_addr and b_start_addr < a_end_addr);
 }
 
-fn fuzz_io_alloc(data: []const u8, alloc: Allocator) !void {
+fn fuzz_io_alloc(data: []const u8, gpa: Allocator) !void {
+    const MAX_ALLOC = 1 << 27;
+
+    std.debug.assert(MAX_ALLOC % IoAlloc.ALIGN == 0);
+
+    const StaticBackingBuf = struct {
+        var buf: ?[]align(512) u8 = null;
+
+        fn get_buf() []align(512) u8 {
+            if (buf) |b| {
+                return b;
+            } else {
+                const b = std.heap.page_allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(512), MAX_ALLOC) catch unreachable;
+                buf = b;
+                return b;
+            }
+        }
+    };
+
     var input = FuzzInput.init(data);
 
-    const capacity = (try input.int(u32)) % (1 << 24);
-    const cap = (capacity + IoAlloc.ALIGN - 1) / IoAlloc.ALIGN * IoAlloc.ALIGN;
-    const num_slots = (cap / IoAlloc.ALIGN) / 4;
-    const backing_buf = try alloc.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(IoAlloc.ALIGN), cap);
-    defer alloc.free(backing_buf);
+    const backing_buf = StaticBackingBuf.get_buf();
 
-    var io_alloc = try IoAlloc.init(backing_buf, alloc);
+    const max_num_slots = backing_buf.len / IoAlloc.ALIGN;
+    const num_slots = (try input.int(u8)) % max_num_slots;
+    const capacity: u32 = @intCast(num_slots * IoAlloc.ALIGN);
+
+    var arena = ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var io_alloc = try IoAlloc.init(backing_buf[0..capacity], alloc);
     defer io_alloc.deinit(alloc);
 
     const buffers = try alloc.alloc([]align(IoAlloc.ALIGN) u8, num_slots);
@@ -79,6 +101,10 @@ fn fuzz_io_alloc(data: []const u8, alloc: Allocator) !void {
             }
         }
     }
+}
+
+test "fuzz io_alloc" {
+    try FuzzWrap(fuzz_io_alloc, 1 << 20).run();
 }
 
 fn fuzz_queue(data: []const u8, alloc: Allocator) !void {
@@ -139,6 +165,10 @@ fn fuzz_queue(data: []const u8, alloc: Allocator) !void {
             else => unreachable,
         }
     }
+}
+
+test "fuzz queue" {
+    try FuzzWrap(fuzz_queue, 1 << 20).run();
 }
 
 fn fuzz_slab(data: []const u8, alloc: Allocator) !void {
@@ -203,6 +233,10 @@ fn fuzz_slab(data: []const u8, alloc: Allocator) !void {
             else => unreachable,
         }
     }
+}
+
+test "fuzz slab" {
+    try FuzzWrap(fuzz_slab, 1 << 20).run();
 }
 
 fn fuzz_slicemap(data: []const u8, alloc: Allocator) !void {
@@ -270,43 +304,44 @@ fn fuzz_slicemap(data: []const u8, alloc: Allocator) !void {
     }
 }
 
-const FuzzContext = struct {
-    fb_alloc: *FixedBufferAllocator,
-};
+test "fuzz slicemap" {
+    try FuzzWrap(fuzz_slicemap, 1 << 20).run();
+}
 
-fn run_fuzz_test(comptime fuzz_one: fn (data: []const u8, gpa: Allocator) anyerror!void, data: []const u8, fb_alloc: *FixedBufferAllocator) anyerror!void {
-    fb_alloc.reset();
-
-    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{
-        .backing_allocator_zeroes = false,
-    }){
-        .backing_allocator = fb_alloc.allocator(),
+fn FuzzWrap(comptime fuzz_one: fn (data: []const u8, gpa: Allocator) anyerror!void, comptime alloc_size: comptime_int) type {
+    const FuzzContext = struct {
+        fb_alloc: *FixedBufferAllocator,
     };
-    const gpa = general_purpose_allocator.allocator();
-    defer {
-        switch (general_purpose_allocator.deinit()) {
-            .ok => {},
-            .leak => |l| {
-                std.debug.panic("LEAK: {any}", .{l});
-            },
+
+    return struct {
+        fn run_one(ctx: FuzzContext, data: []const u8) anyerror!void {
+            ctx.fb_alloc.reset();
+
+            var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{
+                .backing_allocator_zeroes = false,
+            }){
+                .backing_allocator = ctx.fb_alloc.allocator(),
+            };
+            const gpa = general_purpose_allocator.allocator();
+            defer {
+                switch (general_purpose_allocator.deinit()) {
+                    .ok => {},
+                    .leak => |l| {
+                        std.debug.panic("LEAK: {any}", .{l});
+                    },
+                }
+            }
+
+            fuzz_one(data, gpa) catch |e| {
+                if (e == error.ShortInput) return {} else return e;
+            };
         }
-    }
 
-    fuzz_one(data, gpa) catch |e| {
-        if (e == error.ShortInput) return {} else return e;
+        fn run() !void {
+            var fb_alloc = FixedBufferAllocator.init(std.heap.page_allocator.alloc(u8, alloc_size) catch unreachable);
+            try std.testing.fuzz(FuzzContext{
+                .fb_alloc = &fb_alloc,
+            }, run_one, .{});
+        }
     };
-}
-
-fn to_fuzz_wrap(ctx: FuzzContext, data: []const u8) anyerror!void {
-    try run_fuzz_test(fuzz_slicemap, data, ctx.fb_alloc);
-    try run_fuzz_test(fuzz_slab, data, ctx.fb_alloc);
-    try run_fuzz_test(fuzz_queue, data, ctx.fb_alloc);
-    try run_fuzz_test(fuzz_io_alloc, data, ctx.fb_alloc);
-}
-
-test "fuzz" {
-    var fb_alloc = FixedBufferAllocator.init(std.heap.page_allocator.alloc(u8, 1 << 30) catch unreachable);
-    try std.testing.fuzz(FuzzContext{
-        .fb_alloc = &fb_alloc,
-    }, to_fuzz_wrap, .{});
 }
