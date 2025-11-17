@@ -54,7 +54,7 @@ pub const IoAlloc = struct {
         // find first sufficient slot
         var idx: u32 = 0;
         var min_idx: u32 = while (idx < self.num_free) : (idx += 1) {
-            const size = self.free_sizes.ptr[idx];
+            const size = self.free_sizes[idx];
             if (size >= len) {
                 break idx;
             }
@@ -63,26 +63,26 @@ pub const IoAlloc = struct {
         };
 
         // find the smallest slot that is sufficient
-        var min_size = self.free_sizes.ptr[min_idx];
+        var min_size = self.free_sizes[min_idx];
         while (idx < self.num_free) : (idx += 1) {
-            const size = self.free_sizes.ptr[idx];
+            const size = self.free_sizes[idx];
             if (size >= len and size < min_size) {
                 min_idx = idx;
                 min_size = size;
             }
         }
 
-        const out = @as([*]align(ALIGN) u8, @ptrFromInt(self.free_ptrs.ptr[min_idx]))[0..len];
+        const out = @as([*]align(ALIGN) u8, @ptrFromInt(self.free_ptrs[min_idx]))[0..len];
 
         if (min_size == len) {
             // swap-remove the slot from free-list
             self.num_free -= 1;
-            self.free_sizes.ptr[min_idx] = self.free_sizes.ptr[self.num_free];
-            self.free_ptrs.ptr[min_idx] = self.free_ptrs.ptr[self.num_free];
+            self.free_sizes[min_idx] = self.free_sizes[self.num_free];
+            self.free_ptrs[min_idx] = self.free_ptrs[self.num_free];
         } else {
             // shrink the slot in place
-            self.free_sizes.ptr[min_idx] = min_size - len;
-            self.free_ptrs.ptr[min_idx] = @intFromPtr(out.ptr[len..]);
+            self.free_sizes[min_idx] = min_size - len;
+            self.free_ptrs[min_idx] = @intFromPtr(out[len..].ptr);
         }
 
         @memset(out, 0);
@@ -104,21 +104,21 @@ pub const IoAlloc = struct {
         // There can be one left and one right free slot adjacent to the one we are freeing now.
         var idx: u32 = 0;
         while (idx < self.num_free) {
-            const slot_addr = self.free_ptrs.ptr[idx];
-            const slot_size = self.free_sizes.ptr[idx];
+            const slot_addr = self.free_ptrs[idx];
+            const slot_size = self.free_sizes[idx];
 
             if (slot_addr == addr + size) {
-                size +%= slot_size;
-                self.num_free -%= 1;
-                self.free_ptrs.ptr[idx] = self.free_ptrs.ptr[self.num_free];
-                self.free_sizes.ptr[idx] = self.free_sizes.ptr[self.num_free];
+                size += slot_size;
+                self.num_free -= 1;
+                self.free_ptrs[idx] = self.free_ptrs[self.num_free];
+                self.free_sizes[idx] = self.free_sizes[self.num_free];
             } else if (slot_addr + slot_size == addr) {
                 addr = slot_addr;
-                self.num_free -%= 1;
-                self.free_ptrs.ptr[idx] = self.free_ptrs.ptr[self.num_free];
-                self.free_sizes.ptr[idx] = self.free_sizes.ptr[self.num_free];
+                self.num_free -= 1;
+                self.free_ptrs[idx] = self.free_ptrs[self.num_free];
+                self.free_sizes[idx] = self.free_sizes[self.num_free];
             } else {
-                idx +%= 1;
+                idx += 1;
             }
         }
 
@@ -126,8 +126,8 @@ pub const IoAlloc = struct {
         std.debug.assert(self.num_free < self.free_ptrs.len);
         std.debug.assert(addr >= @intFromPtr(self.buf.ptr));
         std.debug.assert(addr + size <= @intFromPtr(self.buf.ptr) + self.buf.len);
-        self.free_ptrs.ptr[self.num_free] = addr;
-        self.free_sizes.ptr[self.num_free] = @intCast(size);
+        self.free_ptrs[self.num_free] = addr;
+        self.free_sizes[self.num_free] = @intCast(size);
         self.num_free += 1;
     }
 };

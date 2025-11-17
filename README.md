@@ -2,6 +2,17 @@
 
 Cooperative scheduling and IO library.
 
+## Examples
+
+- direct_io
+- tcp
+
+Run an example like so:
+
+```
+zig build example -Dexample=direct_io -Doptimize=ReleaseSafe
+```
+
 ## License
 
 Licensed under either of

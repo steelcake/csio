@@ -688,7 +688,7 @@ fn fill_data(data: []u8, counter: u32) void {
     std.debug.assert(data.len == MESSAGE_SIZE);
     var v: u8 = @truncate(counter *% MESSAGE_SIZE);
     for (0..MESSAGE_SIZE) |idx| {
-        data.ptr[idx] = v;
+        data[idx] = v;
         v +%= 1;
     }
 }
@@ -697,7 +697,7 @@ fn check_data(data: []const u8, counter: u32) void {
     std.debug.assert(data.len == MESSAGE_SIZE);
     var v: u8 = @truncate(counter *% MESSAGE_SIZE);
     for (0..MESSAGE_SIZE) |idx| {
-        std.debug.assert(data.ptr[idx] == v);
+        std.debug.assert(data[idx] == v);
         v +%= 1;
     }
 }

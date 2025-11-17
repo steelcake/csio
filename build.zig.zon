@@ -1,6 +1,6 @@
 .{
     .name = .csio,
-    .version = "0.0.2",
+    .version = "0.0.3",
     .fingerprint = 0x3752fddf0c42401c, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0-dev.464+df1909900",
     .dependencies = .{},

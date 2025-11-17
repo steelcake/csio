@@ -54,9 +54,9 @@ pub fn Queue(comptime T: type) type {
                 return error.OutOfCapacity;
             }
 
-            const end = (self.start +% self.len) & self.capacity_mask;
-            self.slots.ptr[end] = elem;
-            self.len +%= 1;
+            const end = (self.start + self.len) & self.capacity_mask;
+            self.slots[end] = elem;
+            self.len += 1;
         }
 
         pub fn pop(self: *Self) ?T {
@@ -64,9 +64,9 @@ pub fn Queue(comptime T: type) type {
                 return null;
             }
 
-            const elem = self.slots.ptr[self.start];
-            self.start = (self.start +% 1) & self.capacity_mask;
-            self.len -%= 1;
+            const elem = self.slots[self.start];
+            self.start = (self.start + 1) & self.capacity_mask;
+            self.len -= 1;
 
             return elem;
         }

@@ -408,7 +408,7 @@ const Write = struct {
 
                                 const buf_data: []u64 = @ptrCast(@alignCast(buf));
                                 for (0..buf_data.len) |i| {
-                                    buf_data.ptr[i] = i +% s.offset;
+                                    buf_data[i] = i +% s.offset;
                                 }
 
                                 io_ptr.* = fs.DirectWrite.init(.{ .fixed = s.fd_idx }, buf, s.offset);
